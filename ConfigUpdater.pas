@@ -98,10 +98,12 @@ const
   SEND_TIMEOUT_MS = 15000;
   RESPONSE_TIMEOUT_MS = 30000;
 
-  // .NET DateTime ticks (100 ns since 0001-01-01) counted at the Unix epoch.
-  DOTNET_EPOCH_TICKS = int64(621355968000000000);
-  TICKS_PER_MS = int64(10000);
   USERINFO_HEADER = 'Subscription-Userinfo';
+
+  // `expire` is a Unix timestamp in *seconds*. Anything at or below this value is
+  // not a usable date (it would render as 1970 or earlier), so it is treated as
+  // "no expiry information" rather than shown as a valid date.
+  EXPIRE_MIN_PLAUSIBLE = int64(100000000); // 1973-03-03, well before any real subscription
 
 function ClampIntervalMs(AIntervalMinutes: int32): cardinal;
 var
@@ -119,22 +121,38 @@ begin
   result := DateTimeToUnix(TTimeZone.Local.ToUniversalTime(Now), false) * 1000;
 end;
 
-function DotNetDateToUnix(AValue: string): int64;
+// The `expire` field of the `Subscription-Userinfo` header is a Unix timestamp in
+// seconds. It is *not* a .NET DateTime tick count: real subscriptions send values
+// like 1798761600, which as ticks would sit far below the .NET epoch and would
+// previously collapse to 0, silently hiding the expiry from the UI.
+//
+// Every malformed input maps to 0 ("unknown"), which callers render as "no expiry":
+//   - missing / empty / whitespace
+//   - non-numeric text, or trailing garbage such as "1798761600Z"
+//   - zero, negative values
+//   - values that overflow Int64
+//   - implausibly small values that cannot be a real Unix second timestamp
+// A bad `expire` must never fail the download; the other traffic fields are
+// parsed independently.
+function ParseUserinfoExpire(const AValue: string): int64;
 var
-  ticks: int64;
+  text: string;
+  value: int64;
 begin
   result := 0;
-  AValue := trim(AValue);
-  if AValue = '' then
+
+  text := trim(AValue);
+  if text = '' then
     exit;
 
-  ticks := StrToInt64Def(AValue, 0);
-  if ticks <= DOTNET_EPOCH_TICKS then
+  // StrToInt64Def returns the default instead of raising on non-numeric input and
+  // on Int64 overflow, which is exactly the behaviour wanted here.
+  value := StrToInt64Def(text, 0);
+
+  if value < EXPIRE_MIN_PLAUSIBLE then
     exit;
 
-  result := (ticks - DOTNET_EPOCH_TICKS) div TICKS_PER_MS div 1000;
-  if result < 0 then
-    result := 0;
+  result := value;
 end;
 
 procedure ParseSubscriptionUserInfo(const AHeader: string; out AInfo: TSubscriptionUserInfo);
@@ -178,7 +196,7 @@ begin
         AInfo.total := parsed;
     end
     else if SameText(key, 'expire') then
-      AInfo.expire := DotNetDateToUnix(value);
+      AInfo.expire := ParseUserinfoExpire(value);
   end;
 end;
 
