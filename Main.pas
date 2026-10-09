@@ -671,9 +671,13 @@ begin
 
   // Switching profiles re-parses the config, so the Windows proxy and the
   // selector/clash API metadata may all have changed.
+  //
+  // Only the value this application actually installed is ever rolled back:
+  // AppliedSystemProxyServer is '' once another tool owns the setting, and in that
+  // case the new owner's configuration is left untouched.
   if FDrover.sbConfig.proxyPort > 0 then
     FSystemProxySetByUs := FDrover.EnableSystemProxy or FSystemProxySetByUs
-  else if FSystemProxySetByUs then
+  else if (FDrover.AppliedSystemProxyServer <> '') then
   begin
     FDrover.DisableSystemProxy;
     FSystemProxySetByUs := false;
@@ -751,39 +755,41 @@ begin
   end;
 
   // An inactive profile gets a one-shot worker that only writes the BPF file.
-  // Switching to it afterwards is what may restart the core - once.
+  // Updating a profile the user did not ask to switch to must never change the
+  // active profile or disturb the running core - switching is a separate, explicit
+  // action ("switch to this subscription"). The worker is owned by the drover, so
+  // it is joined during shutdown and its callback cannot outlive the form.
   if not FDrover.StartProfileUpdate(target,
-    procedure(Sender: TProfileUpdateThread; ASuccess: boolean; const AError: string)
+    procedure(const AFilePath: string; ASuccess: boolean; const AError: string)
     begin
-      TThread.Queue(nil,
+      // ForceQueue, not Queue: this runs on the main thread already, and freeing
+      // the worker here would destroy the thread while its own queued callback is
+      // still on the stack. Deferring the cleanup to the next queue drain keeps
+      // the worker alive until that callback has fully returned.
+      TThread.ForceQueue(nil,
         procedure
-        var
-          switchError: string;
         begin
-          if FClosePending then
-            exit;
-
-          if not ASuccess then
-          begin
-            MarkUpdateState(udsFailed, AError);
-            ShowBalloon(DIALOG_SUBSCRIBE_FAILED + ': ' + AError, DIALOG_TITLE_ERROR, bfError);
-            exit;
-          end;
-
-          // Fetching a profile the user explicitly asked about is the intent of
-          // pressing the button, so it becomes the active one.
-          if not FDrover.SwitchProfile(Sender.FilePath, switchError) then
-          begin
-            MarkUpdateState(udsFailed, switchError);
-            ShowBalloon(switchError, DIALOG_TITLE_ERROR, bfError);
-            exit;
-          end;
-
-          MarkUpdateState(udsSuccess);
-          SetCoreStatus(FDrover.CoreState);
-          RebuildMenu;
-          ScheduleNextUpdateCheck;
+          if Assigned(FDrover) then
+            FDrover.CleanupFinishedUpdateWorkers;
         end);
+
+      if FClosePending or (not Assigned(FDrover)) then
+        exit;
+
+      if not ASuccess then
+      begin
+        MarkUpdateState(udsFailed, AError);
+        ShowBalloon(DIALOG_SUBSCRIBE_FAILED + ': ' + AError, DIALOG_TITLE_ERROR, bfError);
+        exit;
+      end;
+
+      MarkUpdateState(udsSuccess);
+      RebuildMenu;
+      ScheduleNextUpdateCheck;
+
+      // Always confirm what happened: without this, a successful update of a
+      // profile that was deliberately not switched to would look like a no-op.
+      ShowBalloon(DIALOG_SUBSCRIBE_UPDATED_KEPT, DIALOG_TITLE_INFO, bfInfo);
     end, err) then
   begin
     MarkUpdateState(udsFailed, err);
@@ -996,9 +1002,10 @@ begin
   PopupMenu.OnPopup := nil;
   Timer.Enabled := false;
 
-  if FSystemProxySetByUs then
+  if (FDrover.AppliedSystemProxyServer <> '') then
   begin
-    // Only restore what this session actually changed.
+    // Restores the proxy value captured before we changed it. If another tool has
+    // taken the setting over meanwhile, SystemProxy declines to touch it.
     FDrover.DisableSystemProxy;
     FSystemProxySetByUs := false;
   end;

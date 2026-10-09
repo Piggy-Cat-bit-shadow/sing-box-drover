@@ -78,6 +78,10 @@ const
   DIALOG_TITLE_INFO = #$63D0 + #$793A;
   DIALOG_TITLE_ERROR = #$9519 + #$8BEF;
   DIALOG_SUBSCRIBE_FAILED = #$8BA2 + #$9605 + #$66F4 + #$65B0 + #$5931 + #$8D25;
+  // The subscription was updated but the active subscription was left alone.
+  DIALOG_SUBSCRIBE_UPDATED_KEPT = #$8BA2 + #$9605 + #$5DF2 + #$66F4 + #$65B0 + #$FF0C + #$4ECD + #$4F7F + #$7528 + #$5F53 + #$524D + #$8BA2 + #$9605 + #$3002;
+  // Another update for the same subscription is already running.
+  DIALOG_SUBSCRIBE_BUSY = #$8BE5 + #$8BA2 + #$9605 + #$6B63 + #$5728 + #$66F4 + #$65B0 + #$4E2D + #$FF0C + #$8BF7 + #$7A0D + #$540E + #$518D + #$8BD5 + #$3002;
   DIALOG_CORE_START_FAILED = #$5185 + #$6838 + #$542F + #$52A8 + #$5931 + #$8D25;
   DIALOG_PROXY_FAILED = #$8BBE + #$7F6E + ' Windows ' + #$7CFB + #$7EDF + #$4EE3 + #$7406 + #$5931 + #$8D25 + #$3002;
   DIALOG_UAC_DECLINED = #$672A + #$83B7 + #$5F97 + #$7BA1 + #$7406 + #$5458 + #$6743 + #$9650 + #$3002 + #$914D + #$7F6E + #$4E2D + #$5305 + #$542B + ' TUN ' + #$5165 + #$7AD9 + #$FF0C + #$5FC5 + #$987B + #$4EE5 + #$7BA1 + #$7406 + #$5458 + #$8EAB + #$4EFD + #$8FD0 + #$884C + #$3002;

@@ -58,8 +58,12 @@ type
 
   // One-shot worker used by the manual update entry for a profile that is not the active one.
   // It touches exactly one file and never the running core.
+  //
+  // The completion callback deliberately carries the *file path* rather than the
+  // worker instance: the worker is freed as soon as its callback has run, so any
+  // handler that captured the instance could otherwise dereference freed memory.
   TProfileUpdateThread = class;
-  TProfileUpdateDone = procedure(Sender: TProfileUpdateThread; ASuccess: boolean; const AError: string) of object;
+  TProfileUpdateDone = procedure(const AFilePath: string; ASuccess: boolean; const AError: string) of object;
 
   TDrover = class
   private
@@ -95,6 +99,9 @@ type
     function BackgroundWorkersFinished: boolean;
     procedure RequestShutdownWorkers;
     procedure TryCompleteShutdown;
+    // Terminates and joins every one-shot profile worker. Called while shutting
+    // down so that no worker can still be running once the GUI is being destroyed.
+    procedure StopUpdateWorkers;
     procedure NotifyEvent(kind: TDroverEventKind; msg: string = ''); overload;
     procedure NotifyEvent(const event: TDroverEvent); overload;
     procedure ForwardCoreEvent(const event: TCoreEvent);
@@ -125,6 +132,9 @@ type
 
     function EnableSystemProxy: boolean;
     function DisableSystemProxy: boolean;
+    // The proxy string this application last applied, '' when it is not the owner
+    // of the current Windows proxy setting.
+    function AppliedSystemProxyServer: string;
 
     function Shutdown: boolean;
 
@@ -152,9 +162,14 @@ type
     // Makes AFilePath the active profile and immediately activates it.
     function SwitchProfile(const AFilePath: string; out AError: string): boolean;
     // Starts a one-shot download for any profile. AError is set when the request
-    // could not even be scheduled.
+    // could not even be scheduled. At most one worker may exist per profile file,
+    // so two rapid clicks on the same inactive profile can never write the same
+    // BPF concurrently; the second call fails with a "busy" error instead.
     function StartProfileUpdate(const AFilePath: string;
       AOnDone: TProfileUpdateDone; out AError: string): boolean;
+    // Frees one-shot workers that have finished. Called from the completion
+    // callback once it no longer needs the worker.
+    procedure CleanupFinishedUpdateWorkers;
     function ActiveProfilePath: string;
     function IsActiveProfile(const AFilePath: string): boolean;
     function GetSubscriptionInfo(const AProfilePath: string; out AInfo: TSubscriptionUserInfo): boolean;
@@ -550,6 +565,7 @@ function TDrover.StartProfileUpdate(const AFilePath: string;
 var
   profile: TSubscriptionProfile;
   thread: TProfileUpdateThread;
+  worker: TProfileUpdateThread;
 begin
   result := false;
   AError := '';
@@ -558,6 +574,17 @@ begin
   begin
     AError := 'Shutting down.';
     exit;
+  end;
+
+  // Serialize per file: a worker that is still running for this profile would
+  // write the same BPF, so refuse the second request instead of racing it.
+  for worker in FUpdateWorkers do
+  begin
+    if SameText(worker.FilePath, AFilePath) and (not worker.Finished) then
+    begin
+      AError := 'Update already in progress for this profile.';
+      exit;
+    end;
   end;
 
   try
@@ -581,6 +608,59 @@ begin
     IncludeTrailingPathDelimiter(FOptions.sbDir), AOnDone);
   FUpdateWorkers.Add(thread);
   result := true;
+end;
+
+// The worker list only ever shrinks here, and only from the main thread: the
+// completion callback owns the worker until it returns.
+procedure TDrover.CleanupFinishedUpdateWorkers;
+var
+  index: integer;
+begin
+  for index := FUpdateWorkers.Count - 1 downto 0 do
+    if FUpdateWorkers[index].Finished then
+      FUpdateWorkers.Delete(index);
+end;
+
+// Terminates and joins every outstanding one-shot worker. The wait is bounded
+// because TThread.WaitFor has no timeout overload: a worker stuck in a socket
+// call must never be able to hang the shutdown path forever. Termination cancels
+// the in-flight HTTP request, which is what makes workers return promptly.
+procedure TDrover.StopUpdateWorkers;
+const
+  WORKER_JOIN_TIMEOUT_MS = 5000;
+  JOIN_POLL_INTERVAL_MS = 20;
+var
+  index: integer;
+  worker: TProfileUpdateThread;
+  startedAt: UInt64;
+begin
+  for index := 0 to FUpdateWorkers.Count - 1 do
+  begin
+    worker := FUpdateWorkers[index];
+    if Assigned(worker) and (not worker.Finished) then
+    begin
+      // Drop the callback first: after this point the worker must not queue work
+      // that would touch the GUI while it is being torn down.
+      worker.OnDone := nil;
+      worker.Terminate;
+    end;
+  end;
+
+  // GetTickCount64 cannot wrap, unlike GetTickCount, so elapsed-time arithmetic
+  // stays correct no matter how long the machine has been up.
+  startedAt := GetTickCount64;
+  for index := 0 to FUpdateWorkers.Count - 1 do
+  begin
+    worker := FUpdateWorkers[index];
+    while Assigned(worker) and (not worker.Finished) and
+      ((GetTickCount64 - startedAt) < WORKER_JOIN_TIMEOUT_MS) do
+      Sleep(JOIN_POLL_INTERVAL_MS);
+
+    if Assigned(worker) and (not worker.Finished) then
+      Log('A profile update worker did not stop within the join timeout.');
+  end;
+
+  FUpdateWorkers.Clear;
 end;
 
 procedure TDrover.RefreshUpdater;
@@ -1001,9 +1081,18 @@ begin
   result := SystemProxy.EnableSystemProxy(sbConfig.proxyHost, sbConfig.proxyPort);
 end;
 
+// Restores the Windows proxy that was in place before this application changed it.
+// SystemProxy refuses to touch a value another tool has written since, so this is
+// safe to call even when the user has switched proxy managers while we ran.
 function TDrover.DisableSystemProxy: boolean;
 begin
   result := SystemProxy.DisableSystemProxy;
+end;
+
+// '' when this application is not currently responsible for the Windows proxy.
+function TDrover.AppliedSystemProxyServer: string;
+begin
+  result := SystemProxy.AppliedProxyServer;
 end;
 
 function TDrover.Shutdown: boolean;
@@ -1056,6 +1145,11 @@ begin
     FSupervisor.Terminate;
     TThread.RemoveQueuedEvents(FSupervisor);
   end;
+
+  // The one-shot profile workers are owned here too: any of them still running
+  // must be joined before the GUI can be destroyed, otherwise its completion
+  // callback could touch a freed form.
+  StopUpdateWorkers;
 end;
 
 procedure TDrover.PostCanClose;
@@ -1119,6 +1213,7 @@ end;
 procedure TProfileUpdateThread.Execute;
 var
   handler: TProfileUpdateDone;
+  path: string;
 begin
   try
     FSuccess := FUpdater.DownloadProfile(FError, FTraffic);
@@ -1134,10 +1229,14 @@ begin
   if not Assigned(handler) then
     exit;
 
+  // Capture the path by value: the receiver must not need this instance, which is
+  // freed as soon as the queued callback below has run.
+  path := FFilePath;
+
   TThread.Queue(nil,
     procedure
     begin
-      handler(self, FSuccess, FError);
+      handler(path, FSuccess, FError);
     end);
 end;
 
