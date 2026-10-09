@@ -1,5 +1,13 @@
 unit ConfigReader;
 
+// Reads the config source and parses GUI-side metadata out of it.
+//
+// Contract (see project spec section 4/5/6):
+//   * The original config text (`TConfigSource.jsonText`) is what gets handed to
+//     the core. It is never rewritten, trimmed or re-serialized.
+//   * `ReadSingBoxConfig` parses a throw-away copy purely to collect metadata.
+//   * No unit here removes TUN inbounds or injects `experimental.clash_api`.
+
 interface
 
 uses
@@ -8,64 +16,13 @@ uses
 
 function ReadConfigSource(configPath: string): TConfigSource;
 function ReadSingBoxConfig(const jsonText: string): TSingBoxConfig;
-procedure CheckSingBoxConfig(cfg: TSingBoxConfig);
+
+// True when a usable mixed/http inbound was found, i.e. the Windows system
+// proxy can be pointed at this config. A TUN-only config returns False and is
+// still a perfectly valid config.
+function HasUsableProxyInbound(const cfg: TSingBoxConfig): boolean;
 
 implementation
-
-procedure RemoveTunInbounds(rootObj: TJSONObject);
-var
-  i: integer;
-  inboundsArr: TJSONArray;
-  inboundVal: TJSONValue;
-  inboundObj: TJSONObject;
-  inboundType: string;
-begin
-  if not rootObj.TryGetValue('inbounds', inboundsArr) then
-    exit;
-
-  for i := inboundsArr.Count - 1 downto 0 do
-  begin
-    inboundVal := inboundsArr.Items[i];
-    if not(inboundVal is TJSONObject) then
-      continue;
-    inboundObj := inboundVal as TJSONObject;
-    if inboundObj.TryGetValue('type', inboundType) and SameText(inboundType, 'tun') then
-      inboundsArr.Remove(i).Free;
-  end;
-end;
-
-procedure CreateDefaultClashApi(rootObj: TJSONObject; var config: TSingBoxConfig);
-var
-  controller, secret: string;
-  experimentalObj, clashApiObj: TJSONObject;
-  val: TJSONValue;
-begin
-  if rootObj.TryGetValue('experimental', val) then
-  begin
-    if not(val is TJSONObject) then
-      exit;
-    experimentalObj := val as TJSONObject;
-  end
-  else
-  begin
-    experimentalObj := TJSONObject.Create;
-    rootObj.AddPair('experimental', experimentalObj);
-  end;
-
-  if experimentalObj.TryGetValue('clash_api', val) then
-    exit;
-
-  controller := '127.0.0.1:9090';
-  secret := TGUID.NewGuid.ToString;
-
-  clashApiObj := TJSONObject.Create;
-  clashApiObj.AddPair('external_controller', controller);
-  clashApiObj.AddPair('secret', secret);
-  experimentalObj.AddPair('clash_api', clashApiObj);
-
-  config.clashApi.externalController := controller;
-  config.clashApi.secret := secret;
-end;
 
 function ReadConfigSource(configPath: string): TConfigSource;
 var
@@ -87,7 +44,7 @@ begin
   result.filePath := configPath;
 
   if not TFile.Exists(configPath) then
-    raise Exception.Create('Configuration file not found.');
+    raise Exception.Create('Configuration file not found: ' + configPath);
 
   try
     configBytes := TFile.ReadAllBytes(configPath);
@@ -117,11 +74,14 @@ var
   itemsArr: TJSONArray;
   outboundI: integer;
   itemVal: TJSONValue;
-  itemObj, obj: TJSONObject;
+  itemObj, clashApiObj: TJSONObject;
   sel: TConfigSelector;
   outboundsArr: TJSONArray;
   selectorList: TList<TConfigSelector>;
   inboundType: string;
+  listenHost: string;
+  listenPort: integer;
+  hasMixedInbound: boolean;
 
   function getStr(const obj: TJSONObject; const name: string; const ADefault: string = ''): string;
   begin
@@ -131,15 +91,18 @@ var
 
 begin
   result := Default (TSingBoxConfig);
+  hasMixedInbound := false;
+  listenHost := '';
+  listenPort := 0;
 
   normalizedJson := NormalizeJson(jsonText);
   rootValue := TJSONObject.ParseJSONValue(normalizedJson);
   if rootValue = nil then
-    raise Exception.Create('Configuration file is corrupted or contains invalid JSON.');
+    raise Exception.Create('Configuration is corrupted or contains invalid JSON.');
 
   try
     if not(rootValue is TJSONObject) then
-      raise Exception.Create('Invalid JSON.');
+      raise Exception.Create('Configuration root is not a JSON object.');
 
     rootObj := rootValue as TJSONObject;
 
@@ -153,16 +116,34 @@ begin
 
         inboundType := getStr(itemObj, 'type');
 
-        if SameText(inboundType, 'mixed') then
+        if SameText(inboundType, 'tun') then
         begin
-          result.proxyHost := getStr(itemObj, 'listen');
-          result.proxyPort := StrToIntDef(getStr(itemObj, 'listen_port'), 0);
+          result.hasTunInbound := true;
+          continue;
         end;
 
-        if SameText(inboundType, 'tun') then
-          result.hasTunInbound := true;
+        if SameText(inboundType, 'mixed') then
+        begin
+          hasMixedInbound := true;
+          listenHost := getStr(itemObj, 'listen');
+          listenPort := StrToIntDef(getStr(itemObj, 'listen_port'), 0);
+        end
+        else if SameText(inboundType, 'http') then
+        begin
+          result.hasHttpInbound := true;
+          if not hasMixedInbound then
+          begin
+            listenHost := getStr(itemObj, 'listen');
+            listenPort := StrToIntDef(getStr(itemObj, 'listen_port'), 0);
+          end;
+        end;
       end;
     end;
+
+    result.proxyHost := listenHost;
+    result.proxyPort := listenPort;
+    if (result.proxyHost = '') and (result.proxyPort > 0) then
+      result.proxyHost := '127.0.0.1';
 
     if rootObj.TryGetValue('outbounds', itemsArr) then
     begin
@@ -176,6 +157,7 @@ begin
 
           if SameText(getStr(itemObj, 'type'), 'selector') then
           begin
+            sel := Default (TConfigSelector);
             sel.name := getStr(itemObj, 'tag');
             sel.defaultName := getStr(itemObj, 'default');
             sel.defaultIndex := -1;
@@ -185,15 +167,15 @@ begin
               SetLength(sel.outbounds, outboundsArr.Count);
               for outboundI := 0 to outboundsArr.Count - 1 do
               begin
-                outboundName := outboundsArr.Items[outboundI].value;
+                if outboundsArr.Items[outboundI] is TJSONString then
+                  outboundName := TJSONString(outboundsArr.Items[outboundI]).Value
+                else
+                  continue;
+
                 sel.outbounds[outboundI] := outboundName;
                 if sel.defaultName = outboundName then
                   sel.defaultIndex := outboundI;
               end;
-            end
-            else
-            begin
-              SetLength(sel.outbounds, 0);
             end;
 
             if Length(sel.outbounds) > 0 then
@@ -201,44 +183,29 @@ begin
           end;
         end;
 
-        result.Selectors := selectorList.ToArray;
+        result.selectors := selectorList.ToArray;
       finally
         selectorList.Free;
       end;
     end;
 
+    // clash_api is only *read*. It is never created or completed: the selector
+    // UI depends on the user's config, not the other way around.
     result.clashApi.externalController := '';
     result.clashApi.secret := '';
-    if rootObj.TryGetValue('experimental.clash_api', obj) then
+    if rootObj.TryGetValue('experimental.clash_api', clashApiObj) then
     begin
-      obj.TryGetValue('external_controller', result.clashApi.externalController);
-      obj.TryGetValue('secret', result.clashApi.secret);
-    end
-    else if Length(result.Selectors) > 0 then
-    begin
-      CreateDefaultClashApi(rootObj, result);
-    end;
-
-    result.jsonWithTun := rootObj.ToString;
-
-    if result.hasTunInbound then
-    begin
-      RemoveTunInbounds(rootObj);
-      result.jsonWithoutTun := rootObj.ToString;
-    end
-    else
-    begin
-      result.jsonWithoutTun := result.jsonWithTun;
+      clashApiObj.TryGetValue('external_controller', result.clashApi.externalController);
+      clashApiObj.TryGetValue('secret', result.clashApi.secret);
     end;
   finally
     rootValue.Free;
   end;
 end;
 
-procedure CheckSingBoxConfig(cfg: TSingBoxConfig);
+function HasUsableProxyInbound(const cfg: TSingBoxConfig): boolean;
 begin
-  if (cfg.proxyHost = '') or (cfg.proxyPort < 1) then
-    raise Exception.Create('No suitable mixed inbound found for the system proxy.');
+  result := (cfg.proxyHost <> '') and (cfg.proxyPort > 0);
 end;
 
 end.
