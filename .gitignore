@@ -81,3 +81,12 @@ __recovery/
 modules/
 
 .idea/
+
+# JieJieBox additions
+#
+# Python bytecode from tools/ (the app.res generator and the static checker).
+__pycache__/
+*.pyc
+
+# Leftover temp files from the atomic BPF writes (only appear after a crash).
+*.tmp-*
