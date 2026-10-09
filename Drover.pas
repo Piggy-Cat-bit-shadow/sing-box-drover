@@ -56,7 +56,7 @@ type
 
   PUpdaterEvent = ^TUpdaterEvent;
 
-  // One-shot worker used by "立即更新" for a profile that is not the active one.
+  // One-shot worker used by the manual update entry for a profile that is not the active one.
   // It touches exactly one file and never the running core.
   TProfileUpdateThread = class;
   TProfileUpdateDone = procedure(Sender: TProfileUpdateThread; ASuccess: boolean; const AError: string) of object;

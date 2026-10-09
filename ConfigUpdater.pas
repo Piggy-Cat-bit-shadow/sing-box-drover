@@ -2,7 +2,7 @@ unit ConfigUpdater;
 
 // Single worker thread that owns *all* remote profile updates.
 //
-// Both the automatic interval and the "更新" menu item drive this one thread, so
+// Both the automatic interval and the manual "update now" action drive this one thread, so
 // there is never a second HTTP request and never two writers for the same BPF.
 // A candidate config is validated before it replaces anything, and nothing is
 // written at all when the download or validation fails.

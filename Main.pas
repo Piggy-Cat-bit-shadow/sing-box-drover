@@ -714,7 +714,7 @@ begin
   RebuildMenu;
 end;
 
-// "立即更新" always targets one explicit profile, and the menu item carries it in
+// The update entry always targets one explicit profile, and the menu item carries it in
 // Tag (-1 = the active profile).
 procedure TfrmMain.miUpdateNowClick(Sender: TObject);
 var
