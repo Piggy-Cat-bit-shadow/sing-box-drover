@@ -1,0 +1,101 @@
+# Static validation for the JieJieBox sources.
+#
+# IMPORTANT - what this workflow is NOT
+# -------------------------------------
+# This does NOT build JieJieBox.exe and does NOT produce the Windows AMD64 test
+# package. GitHub-hosted windows-latest runners do not ship Delphi/RAD Studio or
+# the VCL, so a real Win64 build cannot run here. Producing the AMD64 artifact in
+# CI is BLOCKED: SAFE_DELPHI_ACTION_RUNNER_NOT_AVAILABLE until an isolated,
+# dedicated build machine is provided and approved. Nothing in this file may be
+# presented as "the client was compiled in CI".
+#
+# What it does do is catch the class of mistake that is easy to introduce while
+# editing this project: Pascal interface/uses inconsistencies, and PowerShell
+# scripts that no longer parse.
+
+name: static validation
+
+on:
+  push:
+    branches: [testing]
+  workflow_dispatch:
+
+# Least privilege: this job only reads the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: static-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: static checks (no compiler)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # check_pascal.py is a static analyser only. Running it is not a build and
+      # its success must never be reported as "Win64 compiled".
+      - name: Static analysis of the Pascal sources
+        shell: pwsh
+        run: |
+          python tools/check_pascal.py
+          $code = $LASTEXITCODE
+          "check_pascal.py exit code: $code" | Tee-Object -FilePath result-pascal.txt
+          if ($code -ne 0) {
+            Write-Host "::error::check_pascal.py reported interface/uses inconsistencies."
+            exit 1
+          }
+
+      - name: PowerShell scripts must parse
+        shell: pwsh
+        run: |
+          $failed = @()
+          $files = Get-ChildItem -Path scripts, tools -Filter *.ps1 -File
+          foreach ($file in $files) {
+            $errors = $null
+            $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $file.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors -and $errors.Count -gt 0) {
+              foreach ($e in $errors) {
+                Write-Host "::error file=$($file.FullName),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+              }
+              $failed += $file.Name
+            }
+          }
+          "parsed $($files.Count) script(s); failures: $($failed.Count)" | Tee-Object -FilePath result-scripts.txt
+          if ($failed.Count -gt 0) { exit 1 }
+
+      - name: Record the CI scope so the artifact cannot be mistaken for a build
+        shell: pwsh
+        run: |
+          @(
+            "workflow        = static validation only"
+            "commit          = $env:GITHUB_SHA"
+            "ref             = $env:GITHUB_REF"
+            "delphi_build    = NO (no Delphi toolchain on GitHub-hosted runners)"
+            "gui_exe         = not produced"
+            "amd64_package   = not produced"
+            "blocked         = SAFE_DELPHI_ACTION_RUNNER_NOT_AVAILABLE"
+          ) -join "`n" | Out-File -FilePath result-scope.txt -Encoding utf8
+
+      - name: Upload the validation record
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-validation-${{ github.sha }}
+          path: |
+            result-pascal.txt
+            result-scripts.txt
+            result-scope.txt
+          if-no-files-found: error
+          retention-days: 7
