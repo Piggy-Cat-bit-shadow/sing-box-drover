@@ -4,7 +4,8 @@ interface
 
 uses
   Winapi.Windows, System.SysUtils, System.Classes, System.Generics.Collections,
-  SingBoxConfig, System.Net.HttpClient, System.Net.URLClient, Logger;
+  System.SyncObjs, SingBoxConfig, System.Net.HttpClient, System.Net.URLClient,
+  Logger;
 
 type
   TCoreApiClient = class
@@ -12,15 +13,25 @@ type
     FClashApiConfig: TClashApiConfig;
     FLogger: TLogger;
     FHttpClient: THTTPClient;
+    FLock: TCriticalSection;
+    FConfigVersion: integer;
 
     procedure Log(const AMessage: string);
   public
     constructor Create(AClashApiConfig: TClashApiConfig; ALogger: TLogger);
     destructor Destroy; override;
 
+    // Swaps the controller/secret, e.g. after a profile switch.
+    procedure SetConfig(const AClashApiConfig: TClashApiConfig);
     function IsConfigured: boolean;
     function CheckReady: boolean;
     procedure SendClashApiRequest(method, path, data: string; timeoutMs: integer = 1000);
+
+    function ExternalController: string;
+    function Secret: string;
+    // Increments on every SetConfig call. The supervisor uses it to notice that
+    // the API moved while it was probing.
+    property ConfigVersion: integer read FConfigVersion;
   end;
 
 implementation
@@ -29,6 +40,8 @@ constructor TCoreApiClient.Create(AClashApiConfig: TClashApiConfig; ALogger: TLo
 begin
   FClashApiConfig := AClashApiConfig;
   FLogger := ALogger;
+  FLock := TCriticalSection.Create;
+  FConfigVersion := 0;
 
   FHttpClient := THTTPClient.Create;
   FHttpClient.ProxySettings := TProxySettings.Create('http://direct');
@@ -37,13 +50,50 @@ end;
 destructor TCoreApiClient.Destroy;
 begin
   FreeAndNil(FHttpClient);
+  FreeAndNil(FLock);
 
   inherited;
 end;
 
+procedure TCoreApiClient.SetConfig(const AClashApiConfig: TClashApiConfig);
+begin
+  FLock.Enter;
+  try
+    FClashApiConfig := AClashApiConfig;
+    inc(FConfigVersion);
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TCoreApiClient.ExternalController: string;
+begin
+  FLock.Enter;
+  try
+    result := FClashApiConfig.externalController;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TCoreApiClient.Secret: string;
+begin
+  FLock.Enter;
+  try
+    result := FClashApiConfig.secret;
+  finally
+    FLock.Leave;
+  end;
+end;
+
 function TCoreApiClient.IsConfigured: boolean;
 begin
-  result := FClashApiConfig.IsConfigured;
+  FLock.Enter;
+  try
+    result := FClashApiConfig.IsConfigured;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 function TCoreApiClient.CheckReady: boolean;
@@ -71,16 +121,19 @@ var
   client: THTTPClient;
   body: TStringStream;
   headers: TNetHeaders;
-  url: string;
+  url, controller, secret: string;
   response: IHTTPResponse;
   startTick: UInt64;
   elapsedMs: UInt64;
   requestInfo: string;
 begin
-  if not IsConfigured then
+  controller := ExternalController;
+  secret := Secret;
+
+  if controller = '' then
     raise Exception.Create('Clash API is not configured.');
 
-  url := 'http://' + FClashApiConfig.externalController + path;
+  url := 'http://' + controller + path;
 
   client := FHttpClient;
 
@@ -92,7 +145,7 @@ begin
   try
     SetLength(headers, 2);
     headers[0].name := 'Authorization';
-    headers[0].value := 'Bearer ' + FClashApiConfig.secret;
+    headers[0].value := 'Bearer ' + secret;
     headers[1].name := 'Content-Type';
     headers[1].value := 'application/json';
 

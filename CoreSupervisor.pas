@@ -1,4 +1,4 @@
-﻿unit CoreSupervisor;
+unit CoreSupervisor;
 
 interface
 
@@ -102,6 +102,11 @@ type
     procedure RequestStart(configJson: string);
     procedure RequestStop;
     function RequestSetSelectors(tasks: TSelectorTasks; requestId: NativeInt): boolean;
+
+    // Swaps the clash_api address/secret, e.g. after switching to a profile whose
+    // config points at a different controller. Without clash_api the client stays
+    // unconfigured and no selector calls are attempted.
+    procedure SetClashApiConfig(const AClashApiConfig: TClashApiConfig);
 
     property OnEvent: TCoreEventHandler read FOnEvent write FOnEvent;
     property state: TCoreState read FState;
@@ -510,6 +515,18 @@ begin
   cmd.selectorTasks := tasks;
   cmd.requestId := requestId;
   result := FQueue.PushItem(cmd) = wrSignaled;
+end;
+
+procedure TCoreSupervisor.SetClashApiConfig(const AClashApiConfig: TClashApiConfig);
+begin
+  if (FCoreApiClient.ExternalController = AClashApiConfig.externalController) and
+    (FCoreApiClient.Secret = AClashApiConfig.secret) then
+    exit;
+
+  FCoreApiClient.SetConfig(AClashApiConfig);
+
+  // The next DoStart re-arms the API readiness probe with the new address.
+  FApiCheckActive := false;
 end;
 
 procedure TCoreSupervisor.HandleCommand(cmd: TCoreCommand);
