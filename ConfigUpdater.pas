@@ -47,6 +47,17 @@ type
     FLastOutcome: TConfigUpdateOutcome;
     FLastError: string;
     FHandleRedirects: boolean;
+    // When True this instance never runs its own scheduling loop; it exists only to
+    // serve synchronous DownloadProfile calls from a one-shot worker thread.
+    //
+    // Without this, creating a TConfigUpdater for a one-shot download ALSO started a
+    // fully functional automatic-update thread with the same file path, so two
+    // threads could run FetchAndStore against the same BPF. The 60 s initial delay
+    // only made that collision unlikely, it did not prevent it.
+    FOneShotOnly: boolean;
+    // Non-zero while a fetch is in progress. Held for the whole
+    // download/validate/commit sequence so two callers can never write the same BPF.
+    FFetchLock: TCriticalSection;
 
     function BuildUserAgent: string;
     function FetchAndStore(out AError: string; out AProfile: TBpfProfile;
@@ -75,6 +86,11 @@ type
       ALastUpdated: int64; ASingBoxCli: TSingBoxCli; ALogger: TLogger; const AWorkDir: string;
       AHandleRedirects: boolean = true);
     destructor Destroy; override;
+
+    // Disables this instance's own scheduling loop, leaving it usable only through
+    // DownloadProfile. Used by the one-shot profile worker so that a single download
+    // never coexists with an automatic-update thread for the same BPF.
+    procedure MakeOneShotOnly;
 
     // Asks for an immediate update. Cheap, thread-safe and never starts a second
     // worker: it only wakes the existing one.
@@ -229,9 +245,25 @@ begin
   FCancelEvent := TEvent.Create(nil, true, false, '');
   FRequestLock := TCriticalSection.Create;
   FPendingLock := TCriticalSection.Create;
+  FFetchLock := TCriticalSection.Create;
+  FOneShotOnly := false;
 
   FreeOnTerminate := false;
   inherited Create(false);
+end;
+
+// Reconfigures an already-constructed updater for one-shot use: its scheduling loop
+// exits immediately instead of arming an interval timer for this same file.
+//
+// This must be called before anything can depend on the loop being idle. It is
+// called from TProfileUpdateThread.Create right after construction; the scheduler
+// cannot have reached its first update because Execute begins with a 60 s initial
+// wait that TerminatedSet and the FOneShotOnly check both interrupt.
+procedure TConfigUpdater.MakeOneShotOnly;
+begin
+  FOneShotOnly := true;
+  // Wake the loop so it observes the flag without waiting for the initial delay.
+  FCancelEvent.SetEvent;
 end;
 
 destructor TConfigUpdater.Destroy;
@@ -247,6 +279,7 @@ begin
   FreeAndNil(FCancelEvent);
   FreeAndNil(FRequestLock);
   FreeAndNil(FPendingLock);
+  FreeAndNil(FFetchLock);
 
   inherited;
 end;
@@ -347,10 +380,25 @@ begin
   handles[1] := FWakeEvent.Handle;
   handles[2] := FCancelEvent.Handle;
 
+  // A one-shot instance must never arm an interval for this file: the outer worker
+  // owns the download for its lifetime.
+  if FOneShotOnly then
+  begin
+    Log('Updater is one-shot only; scheduling loop not started.');
+    exit;
+  end;
+
   // The first check is delayed so a restart does not hammer the subscription host.
   waitResult := WaitForMultipleObjects(3, @handles[0], false, INITIAL_DELAY_MS);
   if (waitResult = WAIT_OBJECT_0) or (waitResult = WAIT_OBJECT_0 + 2) then
     exit;
+
+  // MakeOneShotOnly may have been called while the initial wait was still running.
+  if FOneShotOnly then
+  begin
+    Log('Updater switched to one-shot only; scheduling loop not started.');
+    exit;
+  end;
 
   while not Terminated do
   begin
@@ -464,6 +512,11 @@ begin
   AProfile := Default (TBpfProfile);
   ATraffic := Default (TSubscriptionUserInfo);
 
+  // Serialize the whole download -> validate -> commit sequence. Two callers (the
+  // automatic interval and a manual one-shot) could otherwise both pass validation
+  // and then both write this same BPF file.
+  FFetchLock.Enter;
+
   try
     http := THTTPClient.Create;
     try
@@ -553,6 +606,8 @@ begin
       result := false;
     end;
   end;
+
+  FFetchLock.Leave;
 end;
 
 procedure TConfigUpdater.DoUpdate;

@@ -64,18 +64,13 @@ type
   // `of object` type.
   TProfileUpdateDone = reference to procedure(const AFilePath: string; ASuccess: boolean; const AError: string);
 
-  // One HTTP request, one file.
+  // One-shot worker for a profile that is not the active one.
   //
-  // This must be *fully* declared in the interface: TDrover holds a list of these
-  // and TProfileUpdateDone is used as a TDrover method parameter. A bare forward
-  // declaration ("TProfileUpdateThread = class;") is not enough - the compiler
-  // then reports "not yet completely defined" and every use of Finished,
-  // FilePath or Terminate on it degrades into an undeclared identifier.
-  //
-  // FreeOnTerminate is True so the worker owns its own lifetime and nothing can
-  // free it while its queued completion callback is still pending. TDrover keeps a
-  // non-owning list purely so shutdown can terminate and join workers that are
-  // still running.
+  // Ownership: TDrover owns these objects and destroys each one exactly once, from
+  // the main thread, after its completion callback has run. FreeOnTerminate is
+  // therefore False - the earlier design let the thread free itself while TDrover
+  // still held its address in a non-owning list, so reading .Finished or calling
+  // Terminate on a finished entry could touch reclaimed memory.
   TProfileUpdateThread = class(TThread)
   private
     FUpdater: TConfigUpdater;
@@ -84,6 +79,9 @@ type
     FSuccess: boolean;
     FError: string;
     FTraffic: TSubscriptionUserInfo;
+    // Written by this thread, read by the main thread only after Finished.
+    FCallbackQueued: boolean;
+    FCancelled: boolean;
   protected
     procedure Execute; override;
   public
@@ -91,9 +89,11 @@ type
       ALastUpdated: int64; ASingBoxCli: TSingBoxCli; ALogger: TLogger; const AWorkDir: string;
       AOnDone: TProfileUpdateDone);
     destructor Destroy; override;
-    // Dropping the callback prevents the worker from queueing work that would
-    // touch a GUI that is being torn down.
-    procedure DetachCallback;
+    // Main thread only. Makes the worker finish without queueing a callback, so the
+    // GUI can never be touched after it starts tearing down. Cancels the in-flight
+    // HTTP request as well, which is what actually makes the worker return promptly.
+    procedure CancelAndDetach;
+    property CallbackQueued: boolean read FCallbackQueued;
     property Success: boolean read FSuccess;
     property ErrorMessage: string read FError;
     property Traffic: TSubscriptionUserInfo read FTraffic;
@@ -123,7 +123,10 @@ type
     FProfilesDir: string;
     FActiveProfilePath: string;
     FUpdaterResults: TThreadedQueue<TUpdaterEvent>;
-    FUpdateWorkers: TList<TProfileUpdateThread>;
+    // Owning list: TDrover destroys each one-shot worker exactly once. Only ever
+    // mutated on the main thread (StartProfileUpdate, the completion callback, and
+    // shutdown), so no locking is required.
+    FUpdateWorkers: TObjectList<TProfileUpdateThread>;
     // Backing state for the published NeedsElevation / CoreState properties. These
     // were previously referenced as if they were fields while being declared as a
     // method (or not at all), which is a compile error.
@@ -270,7 +273,7 @@ var
 begin
   FPendingEvents := TList<TDroverEvent>.Create;
   FUpdaterResults := TThreadedQueue<TUpdaterEvent>.Create(64, 1000, 1000);
-  FUpdateWorkers := TList<TProfileUpdateThread>.Create;
+  FUpdateWorkers := TObjectList<TProfileUpdateThread>.Create(true);
   FConfigUpdater := nil;
   FActiveProfilePath := '';
   FPendingConfigText := '';
@@ -677,12 +680,14 @@ begin
   result := true;
 end;
 
-// The worker list only ever shrinks here, and it is a non-owning list: each worker
-// has FreeOnTerminate = True and frees itself. This only drops the list reference.
+// Removes workers that have finished, destroying each exactly once.
 //
-// When the thread finishes, the RTL defers the actual self-free until its queued
-// Execute method has run, so by the time a worker is observed as Finished here its
-// completion callback has already been dispatched and the object is gone.
+// Main thread only, and safe by construction: a worker is only ever freed here
+// after its completion callback has already run (the callback calls this), and
+// Finished is read on an object TDrover still owns because FreeOnTerminate is
+// False. The previous design freed the thread from inside itself while TDrover kept
+// its address in a non-owning list, so every read of .Finished here could have hit
+// reclaimed memory.
 procedure TDrover.CleanupFinishedUpdateWorkers;
 var
   index: integer;
@@ -694,8 +699,8 @@ end;
 
 // Terminates and joins every outstanding one-shot worker. The wait is bounded
 // because TThread.WaitFor has no timeout overload: a worker stuck in a socket
-// call must never be able to hang the shutdown path forever. Termination cancels
-// the in-flight HTTP request, which is what makes workers return promptly.
+// call must never be able to hang the shutdown path forever. CancelAndDetach
+// cancels the in-flight HTTP request first, which is what makes workers return.
 procedure TDrover.StopUpdateWorkers;
 const
   WORKER_JOIN_TIMEOUT_MS = 5000;
@@ -709,12 +714,7 @@ begin
   begin
     worker := FUpdateWorkers[index];
     if Assigned(worker) and (not worker.Finished) then
-    begin
-      // Drop the callback first: after this point the worker must not queue work
-      // that would touch the GUI while it is being torn down.
-      worker.DetachCallback;
-      worker.Terminate;
-    end;
+      worker.CancelAndDetach;
   end;
 
   // GetTickCount64 cannot wrap, unlike GetTickCount, so elapsed-time arithmetic
@@ -1298,11 +1298,16 @@ end;
 // TProfileUpdateThread is declared in the interface section: TDrover holds a list
 // of them and the completion callback is a TDrover method parameter.
 
-// Called while shutting down, before the worker is terminated: after this the
-// worker must not queue a callback that would touch a GUI being torn down.
-procedure TProfileUpdateThread.DetachCallback;
+// Main thread only. Marks the worker as cancelled and drops its callback so it can
+// never touch the GUI, then cancels the in-flight HTTP request.
+//
+// The updater is put into one-shot mode at construction, so there is no sibling
+// scheduling loop to stop here; TConfigUpdater.Destroy performs the join.
+procedure TProfileUpdateThread.CancelAndDetach;
 begin
+  FCancelled := true;
   FOnDone := nil;
+  Terminate;
 end;
 
 constructor TProfileUpdateThread.Create(const AFilePath, ARemotePath: string;
@@ -1313,11 +1318,17 @@ begin
   FOnDone := AOnDone;
   FSuccess := false;
   FError := '';
+  FCallbackQueued := false;
+  FCancelled := false;
 
   FUpdater := TConfigUpdater.Create(AFilePath, ARemotePath, AIntervalMinutes,
     ALastUpdated, ASingBoxCli, ALogger, AWorkDir);
+  // This worker performs exactly one synchronous download. Without this the updater
+  // would also run its own automatic-update loop against the same BPF file.
+  FUpdater.MakeOneShotOnly;
 
-  FreeOnTerminate := true;
+  // Owned by TDrover, destroyed from the main thread exactly once.
+  FreeOnTerminate := false;
   inherited Create(false);
 end;
 
@@ -1344,16 +1355,20 @@ begin
     end;
   end;
 
+  // Read the callback once. Cancellation sets FOnDone to nil and is only ever done
+  // by the main thread, which cannot run concurrently with this code until this
+  // thread has finished, so no lock is required for this snapshot.
   handler := FOnDone;
-  if not Assigned(handler) then
+  if FCancelled or (not Assigned(handler)) then
     exit;
 
-  // Copy everything the queued callback needs into locals. Capturing the fields
-  // directly would make the closure capture Self, and this thread frees itself on
-  // termination, so the callback must not dereference the instance at all.
+  // Copy everything the queued callback needs into locals so the closure never
+  // captures Self; the object outlives this thread but the callback must not depend
+  // on that.
   path := FFilePath;
   err := FError;
   ok := FSuccess;
+  FCallbackQueued := true;
 
   TThread.Queue(nil,
     procedure
