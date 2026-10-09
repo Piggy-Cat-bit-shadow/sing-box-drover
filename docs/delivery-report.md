@@ -34,19 +34,54 @@ rsvars.bat:               C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\rsv
 
 ## II. 真实编译
 
+> **状态更新（2026-10-10 03:0x）：编译已完成。** 第一次成功的 Win64/Release 构建
+> 于 02:56 产出，之后修复了一个单实例缺陷并重新构建。以下保留最初的失败记录作为
+> 根因证据，成功结果见 “II-b”。
+
 ```text
-Delphi IDE Build:        NOT RUN
-MSBuild Win64 Release:   FAIL  (BLOCKED: DELPHI_WIN64_PLATFORM_NOT_INSTALLED)
-Build exit code:         1
-GUI exe absolute path:   C:\src\JieJieBox-git\Win64\Release\JieJieBox.exe  (不存在)
-GUI exe PE machine:      N/A
-GUI exe SHA256:          N/A
-GUI exe last-modified vs HEAD:  N/A
+Delphi IDE Build:        NOT RUN（全程命令行，未使用 IDE）
+MSBuild Win64 Release:   PASS（详见 II-b）
 ```
 
-### 第一次真实编译错误（原文）
+### II-b 成功构建
 
+```text
+Build exit code:         0
+编译器:                  C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\dcc64.exe
+MSBuild:                 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe
+配置/平台:               Release / Win64
+编译日志:                build-Win64-Release.log（0 errors, 5 warnings）
+GUI exe absolute path:   C:\src\JieJieBox-git\Win64\Release\JieJieBox.exe
+GUI exe size:            5,837,312 bytes
+GUI exe PE machine:      0x8664 (AMD64), optional magic 0x020B (PE32+)
+GUI exe VERSIONINFO:     FileVersion 0.1.5.0 / ProductVersion 0.1.5.0
+GUI exe SHA256:          记在包内 SHA256SUMS.txt（每次构建都会变）
 ```
+
+**这是本项目第一次被真正编译**，因此编译器一次性暴露了 9 处静态检查发现不了的缺陷，
+全部已修复（提交 `790e88b`）。其中两条最典型：
+
+- `AppStrings.pas` 的 `DIALOG_BAD_URL` 从**第一个提交起**就是断的
+  （`' http:` 既没有结束引号也没有分号）。
+- `Drover.pas` 的 `TProfileUpdateThread` 只在 implementation 里定义、
+  interface 里仅前向声明，导致它所有成员的使用全部退化成“未声明标识符”。
+
+### II-c 资源管线（app.res）
+
+RLINK32 拒绝原先由 `tools/make_app_res.py` 生成的文件，报
+`E2161 Unsupported 16bit resource`。现改为：
+
+- `tools/app.rc` 描述资源，由 **brcc32** 编译（与消费它的编译器同源，输出布局必然被
+  RLINK32 接受）；
+- brcc32 **无法读取 PNG 压缩的图标项**（报 `Allocate failed`），而仓库三个 `.ico`
+  的 256×256 项都是 PNG，因此 `tools/prepare-icons.ps1` 先把这些项用
+  `System.Drawing` 重编码为 32 位 DIB 到 `tools/icons/`；
+- `scripts/package-release.ps1` 在每次构建前自动执行这两步；`make_app_res.py` 已删除，
+  `app.res` 与 `tools/icons/` 改为生成产物。
+
+### 第一次真实编译错误（原文，保留作根因证据）
+
+```text
 C:\Program Files (x86)\Embarcadero\Studio\37.0\Bin\CodeGear.Delphi.Targets(427,5):
 error MSB6004: The specified task executable location
 "C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\dcc64.exe" is invalid.
@@ -169,19 +204,22 @@ version=sing-box version 0.1.5
 ## IV. 完整测试包
 
 ```text
-local ZIP path:          NOT PRODUCED
-ZIP SHA256:              N/A
-ZIP file listing:        N/A
-ZIP unzip verification:  N/A  (打包脚本内含该步骤，尚未执行到)
-GUI + core both present and AMD64:  NO (GUI 缺失)
-core.txt / BUILDINFO checked:       N/A
-unsigned:                YES (设计为未签名)
+local ZIP path:          C:\src\JieJieBox-git\dist\JieJieBox-Windows-amd64-test-bf6fefd.zip
+ZIP size:                29,050,658 bytes
+ZIP SHA256:              22d9412b71f33dd0ea0a21e9e2d9857734c8568123ed7d9c89b775205a5933a3
+ZIP file listing:        BUILDINFO.txt, config.json, JieJieBox.exe, JieJieBox.ini,
+                         README.md, SHA256SUMS.txt, sing-box.exe, profiles\README.txt
+ZIP unzip verification:  PASS（打包脚本重新解压到干净临时目录，逐文件复算 SHA256 全部匹配）
+GUI + core both present and AMD64:  YES（两者 PE machine 均 0x8664）
+core.txt / BUILDINFO checked:       PASS（BUILDINFO 六项必需字段齐全，signed=no）
+unsigned:                YES
 ```
 
-**未产出测试包**。原因是第 II 节的 `dcc64.exe` 缺失，无法编译 `JieJieBox.exe`。
-按提示词要求，不用旧 EXE、不用改名文件、不用空 ZIP 冒充。
+`tools/smoke-test.ps1` 对该包实测 **退出码 0，全部已执行检查 PASS**：
+8 个条目解压、必需文件齐全、两个 EXE 均为 AMD64、6 个文件 SHA256 全匹配、
+BUILDINFO 字段齐全、`sing-box.exe version` 返回 `sing-box version 0.1.5`。
 
-打包脚本 `scripts/package-release.ps1` 已按第 5 节要求重写，其中包含：
+打包脚本 `scripts/package-release.ps1` 按第 5 节要求实现，其中包含：
 
 - 输出 `dist\JieJieBox-Windows-amd64-test-<shortSHA>.zip`，根目录扁平：
   `JieJieBox.exe`、`sing-box.exe`、`JieJieBox.ini`、`README.md`、
@@ -191,6 +229,7 @@ unsigned:                YES (设计为未签名)
 - `Compress-Archive` 后**立即重新解压到干净临时目录**，逐文件复算 SHA256 与
   `SHA256SUMS.txt` 比对，检查根目录扁平、两个 EXE 均为 AMD64，并拒绝
   `.git`、`core.txt`、日志等；
+- 构建前自动重建 `app.res`（见 II-c）；
 - 删除 `brcc32` + 改 PE 尾部生成 `-opener.exe` 的逻辑（该做法不能产生可用的
   ZIP 打开器，只会破坏已签名 EXE），删除 `config-only.zip`；
 - `-SkipBuild` 必须由 `.build-stamp.txt` 证明同一 commit 才能使用，否则直接失败。
@@ -199,14 +238,64 @@ unsigned:                YES (设计为未签名)
 
 ## V. 实机 Debug（F0/F1/F2/F3）
 
-**全部 `NOT RUN`**。原因：没有可运行的 `JieJieBox.exe`。逐项如下：
+在真实 Windows 桌面会话中对**打包后的** `bf6fefd` 包做了自动化 smoke 测试。GUI 为
+托盘程序、无可见主窗口，因此通过向 `TfrmMain` 窗口 PostMessage 驱动关闭。
+以下只写实际观测到的结果；未观测的一律 NOT RUN。
 
-| 项 | 状态 | 说明 |
+| 项 | 状态 | 实测证据 |
 |---|---|---|
-| F0 ZIP 解压 / PE 双 AMD64 / SHA | NOT RUN | 无 ZIP |
-| F0 `sing-box.exe version` | **PASS** | 实测输出 `sing-box version 0.1.5`，退出 0 |
-| F0 GUI 托盘启动、中文、图标、日志 | NOT RUN | 无 GUI EXE |
-| F0 各一个实例、单实例互斥 | NOT RUN | 无 GUI EXE |
+| F0 ZIP 解压 / PE 双 AMD64 / SHA | **PASS** | smoke-test 退出 0，见第 IV 节 |
+| F0 `sing-box.exe version` | **PASS** | `sing-box version 0.1.5`，退出 0 |
+| F0 GUI 启动为托盘程序 | **PASS** | PID 存活，`TfrmMain` 窗口存在（不可见），WS 约 17 MB |
+| F0 任务管理器各一个实例 | **PASS** | 1 个 `JieJieBox.exe` + 1 个 `sing-box.exe` 子进程 |
+| F0 重复双击被互斥体拒绝 | **PASS**（修复后） | 连续启动 3 次，始终只有 **1** 个进程 |
+| F0 退出后 core 一并退出 | **PASS**（首次运行） | WM_CLOSE 后 GUI 与子 core 均在约 2 秒内消失 |
+| F0 退出后系统代理恢复 | **PASS** | 见下方 C4 专项 |
+| F0 日志无异常 | **PASS** | `JieJieBox.log` 仅 5 行正常启动记录，无异常堆栈 |
+| F0 优雅退出可重复性 | **FAIL** | 第二次运行 WM_CLOSE 后 30 秒仍未退出，详见 V-a |
+| F1 A1 mixed-only | 部分 PASS | 不提权即可运行；自动设置系统代理；退出恢复。断言“既有 inbound 生效”已由 7899 端口监听证实 |
+| F1 A2 mixed + TUN / UAC | NOT RUN | 需要交互式 UAC，未在本轮执行 |
+| F1 A3 TUN-only | NOT RUN | 同上 |
+| F1 B1 selector + clash_api | NOT RUN | 未构造该配置 |
+| F1 B2 selector 无 clash_api | NOT RUN | 未构造该配置 |
+| F1 B3 JSON 保真 | **PASS** | 子进程命令行即 `sing-box.exe --disable-color run -c stdin`，配置经 stdin 原样传入，未重序列化落盘 |
+| F2 C1–C10 订阅与更新 | NOT RUN | 需要 mock HTTP 服务与订阅，未在本轮执行 |
+| F2 D1/D2 profile 切换与重启 | NOT RUN | 未执行 |
+| F3 Windows 系统边界 | NOT RUN | 未执行 |
+
+### V-a 本轮新发现且尚未修复的缺陷
+
+**优雅退出不可靠（3 次测试中 1 次成功、2 次失败）。** 三次 WM_CLOSE 测试：
+
+| 包 | 结果 |
+|---|---|
+| `47373f6` | GUI 与 core 约 2 秒内干净退出，系统代理正确恢复 —— PASS |
+| `790e88b` | 30 秒仍未退出，core 仍在，代理未恢复 —— FAIL |
+| `bf6fefd` | 同样未退出；6 线程全部 Wait、消息循环仍响应 —— FAIL（最终强制结束） |
+
+失败时进程并未卡死：线程全部处于 Wait 状态、`TfrmMain` 仍响应，说明
+`TDrover.Shutdown` 没有返回 true，`BackgroundWorkersFinished` 一直为假。
+`JieJieBox.log` 在 `[Core] Process created` 之后**没有任何新记录**——连
+`Supervisor stopping...` 都没打印，即 supervisor 线程尚未察觉终止信号。
+这指向 `CoreSupervisor.TerminatedSet` / `FQueue.DoShutDown` 与
+`TDrover.RequestShutdownWorkers` 之间的交互，需要下一轮专门定位。
+
+这是真实缺陷，**未修复**。测试后已用 `Stop-Process` 精确清理进程，并把系统代理
+手工恢复为启动前的 `http://127.0.0.1:7890`。
+
+### C4 专项：系统代理恢复（修复验证成功）
+
+本机启动前的真实代理设置为 `ProxyEnable=1`、`ProxyServer=http://127.0.0.1:7890`。
+实测过程：
+
+```text
+启动前 : Enable=1  Server=http://127.0.0.1:7890
+App 运行时: Enable=1  Server=http=127.0.0.1:7899;https=127.0.0.1:7899;socks=127.0.0.1:7899
+退出后 : Enable=1  Server=http://127.0.0.1:7890     <-- 正确还原，未被写成“直连”
+```
+
+旧实现会把这一整套写死成“直连”，从而破坏用户自己的代理。修复后只在确认当前值仍是
+我们写入的值时才回滚，否则保留第三方的新配置。
 | F0 退出后 core 退出、代理恢复 | NOT RUN | 无 GUI EXE |
 | F1 A1 mixed-only | NOT RUN | 无 GUI EXE |
 | F1 A2 mixed + TUN（UAC） | NOT RUN | 无 GUI EXE |
@@ -218,50 +307,44 @@ unsigned:                YES (设计为未签名)
 | F2 D1/D2 profile 切换与重启 | NOT RUN | 无 GUI EXE |
 | F3 Windows 系统边界 | NOT RUN | 无 GUI EXE |
 
-为让这些用例可在工具链就绪后立即执行，本轮新增
-`tools/smoke-test.ps1`，并已用合成包实测跑通（退出码 0）：
-校验 SHA256SUMS、两个 EXE 的 PE 架构、`BUILDINFO` 必需字段、
-`sing-box.exe version`，并把必须人工在桌面完成的项明确列为 NOT RUN，
-绝不冒充 PASS。
+为让其余用例可在后续立即执行，`tools/smoke-test.ps1` 已用合成包和真实包各实测跑通
+一次（退出码 0）：校验 SHA256SUMS、两个 EXE 的 PE 架构、`BUILDINFO` 必需字段、
+`sing-box.exe version`，并把必须人工在桌面完成的项明确列为 NOT RUN，绝不冒充 PASS。
 
-系统代理当前实测值（用于测试后比对，只读采集，未修改）：
-
-```
-ProxyEnable  = 1
-ProxyServer  = 127.0.0.1:7892
-ProxyOverride= *zhihu.com;*zhimg.com;*jd.com;100ime-iat-api.xfyun.cn;*360buyimg.com;
-               *.bilibili.com;*.bilibili.tv;*.hdslb.com;localhost;*.local;127.*;
-               10.*;172.16.*;...;192.168.*
-```
-
-**这一项恰好证明了 C4 修复的必要性**：旧实现的 `DisableSystemProxy` 会把上述
-配置无条件写成“直连”，从而破坏用户现有代理。修复后只在确认当前值仍是我们写入的
-值时才回滚，否则保留第三方的新配置。
-
-进程清理：本轮所有探测进程已按精确名称终止，无残留（`dcc32`/`dcc64`/探测副本
-均已确认不存在）。系统自检正常：`csrss`、`wininit`、`services`、`lsass`、
-`smss`、`explorer`、`winlogon`、`dwm` 均在，uptime 连续未中断。
+进程清理：本轮所有测试进程已按精确 PID 终止，`Get-Process` 与
+`Get-CimInstance Win32_Process` 双重确认无 `JieJieBox` / 测试用 `sing-box` 残留，
+端口 7899 已释放；系统代理已恢复为启动前的 `http://127.0.0.1:7890`。
 
 ---
 
 ## VI. GitHub Actions
 
 ```text
-workflow file:                    未创建（用户明确选择“暂不接 CI”）
-trigger:                          N/A
-runner location/type:             N/A
-runner safety constraints:        N/A
-Delphi source compilation in Action: NO
-run URL:                          N/A
-run conclusion:                   N/A
-Artifact name:                    N/A
-Artifact URL:                     N/A
-Artifact ZIP SHA256:              N/A
+workflow file:                     .github/workflows/static-validation.yml
+trigger:                           push 到 testing；另支持 workflow_dispatch
+runner location/type:              GitHub-hosted windows-latest（非 self-hosted）
+runner safety constraints:         permissions 仅 contents: read；
+                                   无 pull_request / pull_request_target 触发；
+                                   无 continue-on-error；无自动 release / tag；单架构
+Delphi source compilation in Action: NO（该 runner 不含 Delphi/VCL）
+run URL:                           https://github.com/Piggy-Cat-bit-shadow/sing-box-drover/actions/runs/37969151163
+run conclusion:                    success（7/7 steps，含 check_pascal.py 通过）
+Artifact name:                     static-validation-47373f6a7223203876d24315ce89a5d548d97df6
+Artifact URL:                      https://api.github.com/repos/Piggy-Cat-bit-shadow/sing-box-drover/actions/artifacts/11635315286/zip
+Artifact ZIP SHA256:               未能取得（见下）
 Artifact downloaded and validated: NO
 ```
 
-按提示词 G1 的方案 3 处理：本机只有本地 Delphi 时，先完成本地构建与实机测试，
-Action 完整产物标记为
+该 workflow 已在 push 后**真实运行并成功**：`check_pascal.py` 在 CI 上通过，
+说明 Pascal 接口/uses 一致性检查可复现。它是**静态校验**，不编译任何客户端，
+其自身头部与上传的 `result-scope.txt` 都写明 `delphi_build = NO`、
+`gui_exe = not produced`，避免被误当成“已在 CI 编译”。
+
+**Artifact 未下载验证的原因**：GitHub 对 Actions artifact 的 zip 下载接口即使对公开仓库
+也要求认证，匿名请求返回 `401 Requires authentication`，本轮无可用 token。
+只读的 API 已确认该 artifact 存在（名称、700 bytes、`expired=false`）。
+
+按提示词 G1 的方案 3，**AMD64 客户端**在 Actions 中的构建仍标记为：
 
 ```
 BLOCKED: SAFE_DELPHI_ACTION_RUNNER_NOT_AVAILABLE
@@ -269,30 +352,38 @@ BLOCKED: SAFE_DELPHI_ACTION_RUNNER_NOT_AVAILABLE
 
 理由：GitHub-hosted `windows-latest` 不含 Delphi/VCL；把带有商业许可证的个人
 Windows 机器注册成公开仓库的长期 self-hosted runner 有 GitHub 官方文档指出的
-持久入侵风险。用户本轮明确选择“暂不接 CI，先要本地 ZIP”，因此未创建任何
-workflow，也未把静态检查伪装成“已编译的 AMD64 客户端”。
+持久入侵风险。静态检查 workflow 已建立并跑绿，但它**不编译任何客户端**，
+也未被伪装成“已编译的 AMD64 客户端”。
 
 ### 推送状态
 
-本地已有 5 个提交待推送，但**推送通道未打通**：
+**已推送完成。** `origin` 已从 clone 时使用的 ghproxy 镜像改回真实
+`https://github.com/Piggy-Cat-bit-shadow/sing-box-drover.git`；`github.com:443` 恢复
+可达后，用户确认“推送现在通了”，随后以普通 `git push`（非 force）推送：
 
-- `origin` 当前指向 `https://ghproxy.net/https://github.com/...`（clone 时用的镜像，
-  因为本机 `github.com:443` 被间歇性阻断，而 `codeload.github.com` 与
-  `api.github.com` 可达）；
-- `git push --dry-run` 失败：`could not read Username for 'https://ghproxy.net'`，
-  本机没有可用的 git 凭据。
+```text
+origin/testing = bf6fefd253ca75768bf5f11344b570d7b347530a
+本地 HEAD      = bf6fefd253ca75768bf5f11344b570d7b347530a（一致）
+```
 
-用户已选择“提供 PAT 后由 git push”。需要提醒的是：**不要把 PAT 贴进聊天记录**。
-且由于 `github.com:443` 不通，PAT 需要配合镜像使用，这会让镜像方看到该 token；
-若不接受该风险，可改走 GitHub 集成推送（会把 5 个提交合并为 1 个远端提交）。
+期间未使用 force-push、reset 或 rebase，未改 `main`，未打 tag，未发 Release。
 
 ---
 
 ## VII. 发布状态
 
 ```text
-LOCAL_WINDOWS_TEST_PACKAGE_READY: NO   (BLOCKED: DELPHI_WIN64_PLATFORM_NOT_INSTALLED)
-GITHUB_ACTION_AMD64_ARTIFACT_READY: NO (BLOCKED: SAFE_DELPHI_ACTION_RUNNER_NOT_AVAILABLE)
+LOCAL_WINDOWS_TEST_PACKAGE_READY: YES
+  dist\JieJieBox-Windows-amd64-test-bf6fefd.zip
+  sha256 22d9412b71f33dd0ea0a21e9e2d9857734c8568123ed7d9c89b775205a5933a3
+  含真实编译的 JieJieBox.exe（AMD64）与已验真内核 sing-box.exe（AMD64, v0.1.5）
+  smoke-test.ps1 退出码 0；GUI 实机启动/单实例/core 拉起/代理恢复均已实测
+  未签名；尚未在干净机器上复测，且存在 V-a 的优雅退出缺陷
+
+GITHUB_ACTION_AMD64_ARTIFACT_READY: NO
+  BLOCKED: SAFE_DELPHI_ACTION_RUNNER_NOT_AVAILABLE
+  （静态校验 workflow 已建立并跑绿，但它不编译客户端）
+
 PUBLIC_RELEASE_READY: NO
 ```
 
