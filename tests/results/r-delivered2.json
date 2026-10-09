@@ -1,0 +1,146 @@
+﻿[
+    {
+        "scenario":  "wmclose",
+        "index":  1,
+        "guiPid":  16004,
+        "corePids":  [
+                         16592
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "1|http://127.0.0.1:7890",
+        "proxyAfter":  "1|http://127.0.0.1:7890",
+        "elapsedMs":  201,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  2,
+        "guiPid":  18160,
+        "corePids":  [
+                         18760
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "1|http://127.0.0.1:7890",
+        "proxyAfter":  "1|http://127.0.0.1:7890",
+        "elapsedMs":  171,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  3,
+        "guiPid":  22436,
+        "corePids":  [
+                         13772
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "1|http://127.0.0.1:7890",
+        "proxyAfter":  "1|http://127.0.0.1:7890",
+        "elapsedMs":  156,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  4,
+        "guiPid":  22848,
+        "corePids":  [
+                         7476
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "1|http://127.0.0.1:7890",
+        "proxyAfter":  "1|http://127.0.0.1:7890",
+        "elapsedMs":  149,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  5,
+        "guiPid":  4428,
+        "corePids":  [
+                         21612
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "1|http://127.0.0.1:7890",
+        "proxyAfter":  "1|http://127.0.0.1:7890",
+        "elapsedMs":  146,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  6,
+        "guiPid":  23196,
+        "corePids":  [
+                         22352
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "1|http://127.0.0.1:7890",
+        "proxyAfter":  "1|http://127.0.0.1:7890",
+        "elapsedMs":  151,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  7,
+        "guiPid":  20624,
+        "corePids":  [
+                         22608
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "1|http://127.0.0.1:7890",
+        "proxyAfter":  "1|http://127.0.0.1:7890",
+        "elapsedMs":  296,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  8,
+        "guiPid":  22304,
+        "corePids":  [
+                         22728
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "1|http://127.0.0.1:7890",
+        "proxyAfter":  "1|http://127.0.0.1:7890",
+        "elapsedMs":  160,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    }
+]

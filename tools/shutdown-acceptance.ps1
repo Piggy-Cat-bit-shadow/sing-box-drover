@@ -268,6 +268,30 @@ $QuitLabel = [char]0x9000 + [char]0x51FA   # 退出
 
 $results = New-Object System.Collections.Generic.List[object]
 $originalProxy = Get-ProxySnapshot
+
+# Reads the application's own shutdown duration out of its log: the interval between
+# "Shutdown requested" and "Shutdown complete". That is the number the P0 gate cares
+# about, because it is measured inside the process and is therefore not polluted by
+# process start-up (cold first launch, archive extraction, AV scan).
+function Get-AppShutdownMs {
+    param([string]$LogPath, [int64]$SinceTicks)
+
+    if (-not (Test-Path -LiteralPath $LogPath)) { return -1 }
+    $requested = $null
+    $complete = $null
+    foreach ($line in Get-Content -LiteralPath $LogPath -ErrorAction SilentlyContinue) {
+        if ($line -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) .*Shutdown requested') {
+            $ts = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss.fff', $null)
+            if ($ts.Ticks -ge $SinceTicks) { $requested = $ts }
+        }
+        elseif ($line -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) .*Shutdown complete') {
+            $ts = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss.fff', $null)
+            if ($ts.Ticks -ge $SinceTicks) { $complete = $ts }
+        }
+    }
+    if ($requested -and $complete) { return [int](($complete - $requested).TotalMilliseconds) }
+    return -1
+}
 Write-Host ("original proxy: enable={0} server='{1}'" -f $originalProxy.Enable, $originalProxy.Server)
 Write-Host ("quit label    : {0}" -f $QuitLabel)
 
@@ -284,6 +308,7 @@ function Run-One {
         proxyBefore = "$($ProxyBefore.Enable)|$($ProxyBefore.Server)"
         proxyAfter  = ''
         elapsedMs   = -1
+        appShutdownMs = -1
         guiExited   = $false
         coreExited  = $false
         closePath   = ''
@@ -291,6 +316,8 @@ function Run-One {
         note        = ''
     }
 
+    # Local time, because the log stamps are local and are parsed as such.
+    $launchTicks = [datetime]::Now.Ticks
     $proc = Start-Process -FilePath $exe -WorkingDirectory $PackageDir -PassThru
     $record.guiPid = $proc.Id
     $guiPid = $proc.Id
@@ -353,6 +380,9 @@ function Run-One {
         }
         $sw.Stop()
         $record.elapsedMs = [int]$sw.ElapsedMilliseconds
+        # The in-process number is authoritative for the P0 gate; the wall-clock
+        # number above includes process start-up and is reported for context.
+        $record.appShutdownMs = Get-AppShutdownMs -LogPath (Join-Path $PackageDir 'JieJieBox.log') -SinceTicks $launchTicks
         $record.guiExited = $exited
 
         # Owned core must go too.
@@ -422,8 +452,8 @@ try {
             $results.Add([pscustomobject]$r)
             $tag = if ($r.pass) { 'PASS' } else { 'FAIL' }
             $color = if ($r.pass) { 'Green' } else { 'Red' }
-            Write-Host ("   [{0}] {1} #{2}  gui={3} core={4} port={5} {6}ms {7}" -f `
-                    $tag, $kind, $i, $r.guiExited, $r.coreExited, $r.portAfter, $r.elapsedMs, $r.note) -ForegroundColor $color
+            Write-Host ("   [{0}] {1} #{2}  gui={3} core={4} port={5} wall={6}ms app={8}ms {7}" -f `
+                    $tag, $kind, $i, $r.guiExited, $r.coreExited, $r.portAfter, $r.elapsedMs, $r.note, $r.appShutdownMs) -ForegroundColor $color
         }
     }
 }
