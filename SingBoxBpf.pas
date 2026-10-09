@@ -387,47 +387,71 @@ begin
     Move(compressedPayload[0], result[2], Length(compressedPayload));
 end;
 
-// Writes a file through a temp file + atomic replace so that a crash or power
-// loss can never leave a half-written profile behind. Falls back to a direct
-// write only if the replace itself is refused by the filesystem.
+// Writes a file atomically: same-directory temporary file -> write -> flush ->
+// close -> atomic replace.
+//
+// Failure policy: the previous file is preserved. If the temp file cannot be
+// written, or the replacement cannot be completed atomically, this raises and
+// removes its own temp file. It never falls back to writing AFileName in place,
+// because a partially written BPF is a corrupted profile - losing the old file
+// is strictly worse than reporting the failure to the caller.
+//
+// TFile.Replace maps to ReplaceFileW, which replaces the destination atomically.
+// When the destination does not exist yet there is nothing to replace, so the
+// temp file is moved into place instead; the move is retried with overwrite
+// enabled in case AFileName appeared in between.
 procedure AtomicWriteFile(const AFileName: string; const AData: TBytes);
 var
   tempName: string;
-  tempWritten: boolean;
+  tempExists: boolean;
+  replaced: boolean;
 begin
-  tempWritten := false;
+  tempExists := false;
+  replaced := false;
   tempName := AFileName + '.tmp-' + TGUID.NewGuid.ToString;
 
   try
+    // 1. write + flush + close the temporary file. A failure here must surface.
+    //    TFile.WriteAllBytes creates, writes, flushes and disposes the handle.
+    TFile.WriteAllBytes(tempName, AData);
+    tempExists := true;
+
+    // 2. atomic replace. No non-atomic fallback is allowed.
     try
-      TFile.WriteAllBytes(tempName, AData);
-      tempWritten := true;
-    except
-      tempWritten := false;
-    end;
-
-    if tempWritten then
-    begin
-      try
-        if TFile.Exists(AFileName) then
-          TFile.Replace(tempName, AFileName, '')
-        else
+      if TFile.Exists(AFileName) then
+      begin
+        TFile.Replace(tempName, AFileName, '');
+        replaced := true;
+      end
+      else
+      begin
+        try
           TFile.Move(tempName, AFileName);
-        tempWritten := false;
-      except
-        // Keep the temp file: the direct write below is the emergency path and
-        // the temp file is removed in the finally block when that succeeds.
+          replaced := true;
+        except
+          // The destination may have been created between the check above and the
+          // move. Only that race justifies trying the overwriting move, which is
+          // still a single filesystem operation and therefore not a partial write.
+          if not TFile.Exists(AFileName) then
+            raise;
+          TFile.Move(tempName, AFileName, true);
+          replaced := true;
+        end;
       end;
+    except
+      on E: Exception do
+        raise EBpfProfileError.CreateFmt(
+          'Failed to replace the profile file atomically; the previous file was left unchanged (%s).',
+          [E.Message]);
     end;
-
-    if tempWritten then
-      TFile.WriteAllBytes(AFileName, AData);
   finally
-    if tempWritten then
+    // 3. only clean up a temp file we actually created and did not consume.
+    if tempExists and (not replaced) then
     begin
       try
         TFile.Delete(tempName);
       except
+        // A leftover temp file is harmless; never mask the original error.
       end;
     end;
   end;
@@ -438,7 +462,14 @@ begin
   try
     AtomicWriteFile(AFileName, EncodeBpfProfile(AProfile));
   except
-    raise EBpfProfileError.Create('Failed to write BPF profile file.');
+    // Keep the reason visible: the caller must be able to distinguish "the old
+    // file was preserved because the atomic replace failed" from a plain write
+    // error. A generic message here would hide exactly the failure this path is
+    // required to report.
+    on E: EBpfProfileError do
+      raise;
+    on E: Exception do
+      raise EBpfProfileError.Create('Failed to write BPF profile file: ' + E.Message);
   end;
 end;
 
