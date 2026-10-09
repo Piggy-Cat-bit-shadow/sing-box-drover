@@ -98,3 +98,7 @@ __pycache__/
 
 # Leftover temp files from the atomic BPF writes (only appear after a crash).
 *.tmp-*
+
+# Generated during the build from tools/app.rc by brcc32.
+app.res
+tools/icons/

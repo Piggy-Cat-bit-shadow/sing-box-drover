@@ -56,7 +56,10 @@ const
   BPF_EXTENSION = '.bpf';
   FALLBACK_PROFILE_NAME = 'subscription';
   // Characters Windows rejects in a file name.
-  INVALID_FILE_CHARS: array [0 .. 8] of char = ('<', '>', ':', '"', '/', '\', '|', '?', '*');
+  //
+  // This must be a set, not an array: CharInSet requires a TSysCharSet, and the
+  // previous array declaration means this line could never have compiled.
+  INVALID_FILE_CHARS: TSysCharSet = ['<', '>', ':', '"', '/', '\', '|', '?', '*'];
   // Device names that are illegal as a file name base on Windows.
   RESERVED_NAMES: array [0 .. 21] of string = ('CON', 'PRN', 'AUX', 'NUL',
     'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',

@@ -1,0 +1,69 @@
+// Resource script for JieJieBox.
+//
+// Compiled by brcc32 (shipped with RAD Studio) into app.res, the file embedded by
+// {$R 'app.res'} in JieJieBox.dpr:
+//
+//     brcc32 -foapp.res tools\app.rc
+//
+// Why brcc32 and not a hand-written .res writer: brcc32 is the resource compiler
+// that RLINK32 is built to consume, so its output layout is by definition accepted.
+// A hand-rolled writer was tried and RLINK32 rejected it with
+// "E2161 Unsupported 16bit resource".
+//
+// The icons referenced here are the *rewritten* copies under tools/icons, produced
+// by tools/prepare-icons.ps1. The originals in the repository root store their
+// 256x256 image as PNG, which brcc32 cannot read ("Allocate failed"); that script
+// re-encodes those entries as 32-bit DIBs.
+//
+// The icon groups are addressed by *name* at runtime through
+// TIcon.LoadFromResourceName(HInstance, 'TRAY_ICON') and friends.
+//
+// brcc32 does not search the RAD Studio include directory, so the single constant
+// used below is spelled out instead of including windows.h.
+
+#define RT_MANIFEST 24
+
+// --- application icon and the three tray states -----------------------------
+// MAINICON is the name Windows uses for the executable's own icon.
+MAINICON           ICON    "icons\\icon.ico"
+TRAY_ICON          ICON    "icons\\icon.ico"
+TRAY_ICON_DISABLED ICON    "icons\\icon_disabled.ico"
+TRAY_ICON_TUN      ICON    "icons\\icon_tun.ico"
+
+// --- application manifest ---------------------------------------------------
+// PerMonitorV2 DPI awareness, the common-controls v6 dependency, and an asInvoker
+// execution level: the program relaunches itself elevated only when the
+// configuration actually contains a tun inbound.
+1 RT_MANIFEST "app.manifest"
+
+// --- version information ----------------------------------------------------
+// package-release.ps1 reads FileVersion/ProductVersion back out of the built
+// executable, so the GUI version has exactly one source of truth.
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    0,1,5,0
+ PRODUCTVERSION 0,1,5,0
+ FILEFLAGSMASK  0x3fL
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "Comments",         "Lightweight Windows tray shell for the custom sing-box core"
+            VALUE "FileDescription",  "JieJieBox for Windows"
+            VALUE "FileVersion",      "0.1.5.0"
+            VALUE "InternalName",     "JieJieBox"
+            VALUE "LegalCopyright",   ""
+            VALUE "OriginalFilename", "JieJieBox.exe"
+            VALUE "ProductName",      "JieJieBox"
+            VALUE "ProductVersion",   "0.1.5.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

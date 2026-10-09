@@ -248,6 +248,53 @@ function Invoke-DelphiBuild {
     Write-Host "    build exit code: 0" -ForegroundColor Green
 }
 
+# Regenerates app.res from tools/app.rc.
+#
+# app.res is embedded by {$R 'app.res'} and holds the tray icons, the DPI/manifest
+# and the VERSIONINFO that this script later reads back out of the EXE, so it has to
+# be rebuilt before the compiler runs. brcc32 is used rather than a hand-written
+# .res writer because its layout is by definition the one RLINK32 accepts.
+#
+# tools/prepare-icons.ps1 must run first: the repository's .ico files store their
+# 256x256 image as PNG, which brcc32 cannot read ("Allocate failed").
+function Invoke-ResourceBuild {
+    param([string]$BdsBin)
+
+    $brcc32 = Join-Path $BdsBin 'brcc32.exe'
+    if (-not (Test-Path -LiteralPath $brcc32)) {
+        throw "brcc32.exe not found in $BdsBin; cannot build app.res."
+    }
+
+    $toolsDir = Join-Path $Root 'tools'
+    $rcPath = Join-Path $toolsDir 'app.rc'
+    if (-not (Test-Path -LiteralPath $rcPath)) {
+        throw "Resource script not found: $rcPath"
+    }
+
+    Write-Step 'Preparing icons and compiling app.res'
+    $iconScript = Join-Path $toolsDir 'prepare-icons.ps1'
+    if (-not (Test-Path -LiteralPath $iconScript)) {
+        throw "Icon preparation script not found: $iconScript"
+    }
+    & $iconScript
+
+    $resPath = Join-Path $Root 'app.res'
+    # -i $Root so that app.manifest resolves; the .rc lives in tools\.
+    $command = 'cd /d "{0}" && "{1}" -i "{2}" -fo"{3}" app.rc' -f $toolsDir, $brcc32, $Root, $resPath
+    $output = & cmd.exe /c $command 2>&1
+    $exitCode = $LASTEXITCODE
+
+    if ($exitCode -ne 0) {
+        throw ("brcc32 failed with exit code {0}:{1}{2}" -f $exitCode, [Environment]::NewLine,
+            (($output | Select-Object -Last 15) -join [Environment]::NewLine))
+    }
+    if (-not (Test-Path -LiteralPath $resPath)) {
+        throw "brcc32 reported success but $resPath was not created."
+    }
+
+    Write-Host ("    app.res: {0} bytes" -f (Get-Item -LiteralPath $resPath).Length) -ForegroundColor Green
+}
+
 # Reads the real GUI version out of the compiled binary's VERSIONINFO, which is
 # stamped by app.res. The core version must never be mistaken for it.
 function Get-GuiFileVersion {
@@ -292,6 +339,12 @@ try {
                 'or pass -SkipBuild with an EXE that was already built from this commit.')
         }
         Write-Host "    Delphi bin: $bdsBin"
+
+        # app.res must exist before the compiler runs: {$R 'app.res'} embeds it, and
+        # it carries the tray icons, the manifest and the VERSIONINFO that this
+        # script reads back out of the EXE below.
+        Invoke-ResourceBuild -BdsBin $bdsBin
+
         Write-Step "Building $PackageName ($Config, $Platform)"
 
         # Rebuild from scratch so a stale EXE can never be mistaken for this run's output.
@@ -484,13 +537,13 @@ This directory ships empty: add subscriptions from the tray menu.
             }
             if (-not $item.PSIsContainer -and
                 ($item.Name -notin @("$PackageName.exe", 'sing-box.exe', "$PackageName.ini",
-                        'README.md', 'BUILDINFO.txt', 'SHA256SUMS.txt'))) {
+                        'README.md', 'BUILDINFO.txt', 'SHA256SUMS.txt', 'config.json'))) {
                 throw "Unexpected file inside the archive: $($item.Name)"
             }
         }
 
         foreach ($required in @("$PackageName.exe", 'sing-box.exe', "$PackageName.ini",
-                'README.md', 'BUILDINFO.txt', 'SHA256SUMS.txt')) {
+                'README.md', 'BUILDINFO.txt', 'SHA256SUMS.txt', 'config.json')) {
             if (-not (Test-Path -LiteralPath (Join-Path $verifyDir $required))) {
                 throw "Required file missing from the archive: $required"
             }

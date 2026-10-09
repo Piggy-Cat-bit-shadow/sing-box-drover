@@ -430,11 +430,12 @@ begin
           replaced := true;
         except
           // The destination may have been created between the check above and the
-          // move. Only that race justifies trying the overwriting move, which is
-          // still a single filesystem operation and therefore not a partial write.
+          // move. Only that race is recoverable: in that case AFileName exists, so
+          // the atomic replace is the correct call. TFile has no overwriting Move
+          // overload, and replacing is atomic anyway, so nothing weaker is used.
           if not TFile.Exists(AFileName) then
             raise;
-          TFile.Move(tempName, AFileName, true);
+          TFile.Replace(tempName, AFileName, '');
           replaced := true;
         end;
       end;

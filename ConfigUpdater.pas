@@ -14,7 +14,8 @@ interface
 
 uses
   Winapi.Windows, System.SysUtils, System.Classes, System.SyncObjs,
-  System.Net.HttpClient, System.Net.URLClient, Logger, SingBoxCli, SingBoxConfig;
+  System.Net.HttpClient, System.Net.URLClient, Logger, SingBoxCli, SingBoxConfig,
+  SingBoxBpf;
 
 type
   TConfigUpdateOutcome = (cuoIdle, cuoUpdating, cuoSuccess, cuoFailed);
@@ -35,6 +36,9 @@ type
     FOnNotify: TConfigUpdateNotify;
     FStopEvent: TEvent;
     FWakeEvent: TEvent;
+    // Signalled by TerminatedSet. A third handle is required because
+    // WaitForMultipleObjects cannot observe TThread.Terminated on its own.
+    FCancelEvent: TEvent;
     FRequest: IHTTPRequest;
     FRequestLock: TCriticalSection;
     FPendingLock: TCriticalSection;
@@ -42,7 +46,7 @@ type
     FLastUpdated: int64;
     FLastOutcome: TConfigUpdateOutcome;
     FLastError: string;
-    FRedirectPolicy: THTTPRedirectPolicy;
+    FHandleRedirects: boolean;
 
     function BuildUserAgent: string;
     function FetchAndStore(out AError: string; out AProfile: TBpfProfile;
@@ -60,12 +64,16 @@ type
     procedure Execute; override;
     procedure TerminatedSet; override;
   public
-    // ARedirectPolicy defaults to THTTPRedirectPolicy.Always: airport
-    // subscription URLs redirect as a rule, and a one-shot worker has nothing
-    // to gain from refusing them.
+    // AHandleRedirects defaults to True: airport subscription URLs redirect as a
+    // rule, and a one-shot worker has nothing to gain from refusing them.
+    //
+    // This replaced a THTTPRedirectPolicy parameter. No such type (and no
+    // THTTPClient.RedirectPolicy property) exists in this Delphi version; the
+    // supported API is the Boolean THTTPClient.HandleRedirects, which is what the
+    // old "Always" default meant anyway.
     constructor Create(const AFilePath, ARemotePath: string; AIntervalMinutes: int32;
       ALastUpdated: int64; ASingBoxCli: TSingBoxCli; ALogger: TLogger; const AWorkDir: string;
-      ARedirectPolicy: THTTPRedirectPolicy = THTTPRedirectPolicy.Always);
+      AHandleRedirects: boolean = true);
     destructor Destroy; override;
 
     // Asks for an immediate update. Cheap, thread-safe and never starts a second
@@ -88,7 +96,7 @@ implementation
 
 uses
   System.DateUtils, System.IOUtils, System.StrUtils,
-  ConfigReader, SingBoxBpf;
+  ConfigReader;
 
 const
   INITIAL_DELAY_MS = 60000;
@@ -202,11 +210,11 @@ end;
 
 constructor TConfigUpdater.Create(const AFilePath, ARemotePath: string; AIntervalMinutes: int32;
   ALastUpdated: int64; ASingBoxCli: TSingBoxCli; ALogger: TLogger; const AWorkDir: string;
-  ARedirectPolicy: THTTPRedirectPolicy);
+  AHandleRedirects: boolean);
 begin
   FFilePath := AFilePath;
   FRemotePath := ARemotePath;
-  FRedirectPolicy := ARedirectPolicy;
+  FHandleRedirects := AHandleRedirects;
   FIntervalMs := ClampIntervalMs(AIntervalMinutes);
   FLastUpdated := ALastUpdated;
   FSingBoxCli := ASingBoxCli;
@@ -218,6 +226,7 @@ begin
 
   FStopEvent := TEvent.Create(nil, true, false, '');
   FWakeEvent := TEvent.Create(nil, true, false, '');
+  FCancelEvent := TEvent.Create(nil, true, false, '');
   FRequestLock := TCriticalSection.Create;
   FPendingLock := TCriticalSection.Create;
 
@@ -230,10 +239,12 @@ begin
   Terminate;
   FStopEvent.SetEvent;
   FWakeEvent.SetEvent;
+  FCancelEvent.SetEvent;
   WaitFor;
 
   FreeAndNil(FStopEvent);
   FreeAndNil(FWakeEvent);
+  FreeAndNil(FCancelEvent);
   FreeAndNil(FRequestLock);
   FreeAndNil(FPendingLock);
 
@@ -313,39 +324,70 @@ begin
   result := elapsed >= int64(FIntervalMs);
 end;
 
+// Waits on the stop, wake and cancel handles directly through
+// WaitForMultipleObjects. The previous implementation called
+// TWaitResult.Poll(handles, timeout), a class function that does not exist in
+// this Delphi version, so this loop could never have compiled.
+//
+// WAIT_OBJECT_0 is the stop handle and WAIT_OBJECT_0 + 2 is the cancel handle, so
+// a stop request always wins over a concurrent wake.
+//
+// GetTickCount64 is used because, unlike GetTickCount, it cannot wrap, so a
+// long-running updater never mis-computes its remaining timeout.
 procedure TConfigUpdater.Execute;
 var
-  handles: array [0 .. 1] of THandle;
-  waitResult: TWaitResult;
-  due: boolean;
+  handles: array [0 .. 2] of THandle;
+  waitResult: DWORD;
+  deadline: UInt64;
+  remaining: int64;
 begin
   Log(format('Updater started for "%s" (interval %d min).', [FFilePath, FIntervalMs div MS_PER_MINUTE]));
 
   handles[0] := FStopEvent.Handle;
   handles[1] := FWakeEvent.Handle;
+  handles[2] := FCancelEvent.Handle;
 
-  if FStopEvent.WaitFor(INITIAL_DELAY_MS) <> wrTimeout then
+  // The first check is delayed so a restart does not hammer the subscription host.
+  waitResult := WaitForMultipleObjects(3, @handles[0], false, INITIAL_DELAY_MS);
+  if (waitResult = WAIT_OBJECT_0) or (waitResult = WAIT_OBJECT_0 + 2) then
     exit;
 
   while not Terminated do
   begin
-    waitResult := TWaitResult.Poll(handles, FIntervalMs);
+    if not IntervalElapsed then
+    begin
+      // Wait up to a full interval, waking whenever an event fires. Polling at
+      // 250 ms keeps the deadline honest without busy-waiting.
+      deadline := GetTickCount64 + FIntervalMs;
+      repeat
+        if Terminated then
+          break;
 
-    if Terminated then
+        waitResult := WaitForMultipleObjects(3, @handles[0], false, 250);
+
+        if (waitResult <> WAIT_TIMEOUT) and (waitResult <> WAIT_OBJECT_0 + 2) then
+          break;
+
+        remaining := int64(deadline) - int64(GetTickCount64);
+      until remaining <= 0;
+
+      if Terminated then
+        break;
+    end;
+
+    // Recompute: the wait may have ended on the interval, on a wake, or on a stop.
+    if (waitResult = WAIT_OBJECT_0) or (waitResult = WAIT_OBJECT_0 + 2) then
       break;
 
-    if waitResult = wrSignaled then
+    if waitResult = WAIT_OBJECT_0 + 1 then
     begin
-      if FStopEvent.WaitFor(0) = wrSignaled then
-        break;
-
-      due := ConsumePendingUpdate or IntervalElapsed;
-      if due then
+      // A wake was requested by the manual action or by the scheduler.
+      if ConsumePendingUpdate or IntervalElapsed then
         DoUpdate;
       continue;
     end;
 
-    // wrTimeout: the interval expired on its own.
+    // Either the interval expired or the deadline elapsed on its own.
     if IntervalElapsed then
     begin
       ClearPendingUpdates;
@@ -365,6 +407,7 @@ begin
 
   FStopEvent.SetEvent;
   FWakeEvent.SetEvent;
+  FCancelEvent.SetEvent;
 
   FRequestLock.Enter;
   try
@@ -428,7 +471,7 @@ begin
       http.ConnectionTimeout := CONNECTION_TIMEOUT_MS;
       http.SendTimeout := SEND_TIMEOUT_MS;
       http.ResponseTimeout := RESPONSE_TIMEOUT_MS;
-      http.RedirectPolicy := FRedirectPolicy;
+      http.HandleRedirects := FHandleRedirects;
 
       FRequestLock.Enter;
       try

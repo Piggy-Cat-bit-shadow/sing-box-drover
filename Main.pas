@@ -18,7 +18,7 @@ uses
   System.Net.HttpClient, System.Net.URLClient, System.JSON, System.IOUtils,
   System.Generics.Collections, System.DateUtils, Options, Drover, AppElevation,
   AppArgs, SingBoxConfig, ElevatedTrayIcon, Autostart, Winapi.ShellAPI,
-  CoreSupervisor, AppStrings, SubscriptionManager, ConfigReader;
+  CoreSupervisor, AppStrings, SubscriptionManager, ConfigReader, SingBoxBpf;
 
 type
   TPendingSelectorRequests = TDictionary<NativeInt, TMenuItem>;
@@ -440,7 +440,7 @@ begin
     item.Caption := profile.name;
     item.AutoCheck := true;
     item.RadioItem := true;
-    item.Checked := SubscriptionManager.SamePath(profile.filePath, activePath);
+    item.Checked := TSubscriptionManager.SamePath(profile.filePath, activePath);
     item.GroupIndex := 1;
     item.Tag := i;
     item.OnClick := miProfileClick;
@@ -485,7 +485,7 @@ begin
   // there is nothing to update.
   activeIndex := MENU_IDX_NONE;
   for i := 0 to High(profiles) do
-    if SubscriptionManager.SamePath(profiles[i].filePath, activePath) then
+    if TSubscriptionManager.SamePath(profiles[i].filePath, activePath) then
     begin
       activeIndex := i;
       break;
@@ -757,15 +757,18 @@ begin
   // An inactive profile gets a one-shot worker that only writes the BPF file.
   // Updating a profile the user did not ask to switch to must never change the
   // active profile or disturb the running core - switching is a separate, explicit
-  // action ("switch to this subscription"). The worker is owned by the drover, so
-  // it is joined during shutdown and its callback cannot outlive the form.
+  // action ("switch to this subscription").
+  //
+  // The completion callback is an anonymous method, so it captures Target and the
+  // local error string by value. It must not need the worker instance, which is
+  // freed by the thread itself as soon as it terminates. The worker is still owned
+  // by the drover for join purposes, so it cannot outlive the form.
   if not FDrover.StartProfileUpdate(target,
     procedure(const AFilePath: string; ASuccess: boolean; const AError: string)
     begin
-      // ForceQueue, not Queue: this runs on the main thread already, and freeing
-      // the worker here would destroy the thread while its own queued callback is
-      // still on the stack. Deferring the cleanup to the next queue drain keeps
-      // the worker alive until that callback has fully returned.
+      // ForceQueue, not Queue: this runs on the main thread already, and the worker
+      // is freed on its own termination, so the cleanup must be deferred rather
+      // than run while the worker's queued callback is still on the stack.
       TThread.ForceQueue(nil,
         procedure
         begin
@@ -808,7 +811,7 @@ begin
     exit;
 
   try
-    loaded := SubscriptionManager.Load(filePath);
+    loaded := TSubscriptionManager.Load(filePath);
   except
     on E: Exception do
     begin
@@ -823,7 +826,7 @@ begin
   if profile.autoUpdate and (profile.autoUpdateInterval <= 0) then
     profile.autoUpdateInterval := DEFAULT_UPDATE_INTERVAL_MINUTES;
 
-  if not SubscriptionManager.Write(filePath, profile) then
+  if not TSubscriptionManager.Write(filePath, profile) then
   begin
     ShowBalloon(DIALOG_TITLE_ERROR, DIALOG_TITLE_ERROR, bfError);
     exit;
@@ -839,12 +842,24 @@ end;
 procedure TfrmMain.miAddSubscriptionClick(Sender: TObject);
 var
   name, url, filePath: string;
+  prompts: array [0 .. 1] of string;
+  values: array [0 .. 1] of string;
 begin
   name := '';
   url := 'https://';
 
-  if not InputQuery(DIALOG_ADD_TITLE, [DIALOG_ADD_NAME_PROMPT, DIALOG_ADD_URL_PROMPT], [name, url]) then
+  // InputQuery's prompts/values parameters are var-parameters (array of string),
+  // so real arrays are required; an inline literal cannot be passed to them.
+  prompts[0] := DIALOG_ADD_NAME_PROMPT;
+  prompts[1] := DIALOG_ADD_URL_PROMPT;
+  values[0] := name;
+  values[1] := url;
+
+  if not InputQuery(DIALOG_ADD_TITLE, prompts, values) then
     exit;
+
+  name := values[0];
+  url := values[1];
 
   name := trim(name);
   url := trim(url);

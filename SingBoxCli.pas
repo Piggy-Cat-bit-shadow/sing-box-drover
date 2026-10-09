@@ -3,7 +3,7 @@ unit SingBoxCli;
 interface
 
 uses
-  Winapi.Windows, System.SysUtils, System.SyncObjs, Logger;
+  Winapi.Windows, System.SysUtils, System.Classes, System.SyncObjs, Logger;
 
 type
   TSingBoxCli = class

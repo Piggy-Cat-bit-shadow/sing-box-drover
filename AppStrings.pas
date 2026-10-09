@@ -73,7 +73,10 @@ const
   DIALOG_DELETE_FAILED = #$5220 + #$9664 + #$8BA2 + #$9605 + #$5931 + #$8D25 + #$3002;
   DIALOG_DELETE_CONFIRM = #$786E + #$5B9A + #$5220 + #$9664 + #$8FD9 + #$4E2A + #$8BA2 + #$9605 + #$5417 + #$FF1F;
   DIALOG_OPEN_DIR_FAILED = #$65E0 + #$6CD5 + #$6253 + #$5F00 + #$8BA2 + #$9605 + #$76EE + #$5F55 + #$3002;
-  DIALOG_BAD_URL = #$8BF7 + #$8F93 + #$5165 + #$6709 + #$6548 + #$7684 + ' http:
+  // Reconstructed: the source line ended mid-literal (' http: with no closing
+  // quote or semicolon), so this constant could never have compiled. The leading
+  // codes spell the Chinese prompt and the literal supplies the URL prefix.
+  DIALOG_BAD_URL = #$8BF7 + #$8F93 + #$5165 + #$6709 + #$6548 + #$7684 + ' http:// URL';
   DIALOG_ADD_FAILED = #$6DFB + #$52A0 + #$8BA2 + #$9605 + #$5931 + #$8D25;
   DIALOG_TITLE_INFO = #$63D0 + #$793A;
   DIALOG_TITLE_ERROR = #$9519 + #$8BEF;

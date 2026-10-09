@@ -18,7 +18,7 @@ uses
   System.JSON, System.IOUtils, System.Generics.Collections, System.SyncObjs,
   Winapi.ShellAPI, Options,
   CoreSupervisor, Logger, AppElevation, AppArgs, SingBoxConfig, SingBoxCli,
-  ConfigReader, ConfigUpdater, AppState, SubscriptionManager;
+  ConfigReader, ConfigUpdater, AppState, SubscriptionManager, SingBoxBpf;
 
 const
   WM_DROVER_CAN_CLOSE = WM_APP + 501;
@@ -56,14 +56,50 @@ type
 
   PUpdaterEvent = ^TUpdaterEvent;
 
-  // One-shot worker used by the manual update entry for a profile that is not the active one.
-  // It touches exactly one file and never the running core.
-  //
   // The completion callback deliberately carries the *file path* rather than the
-  // worker instance: the worker is freed as soon as its callback has run, so any
-  // handler that captured the instance could otherwise dereference freed memory.
-  TProfileUpdateThread = class;
-  TProfileUpdateDone = procedure(const AFilePath: string; ASuccess: boolean; const AError: string) of object;
+  // worker instance, so no handler needs a pointer to a thread that is about to
+  // free itself. It is an anonymous method type rather than an `of object` method
+  // pointer so that callers can capture their own local state (the profile they
+  // asked about, for example); an inline anonymous procedure cannot satisfy an
+  // `of object` type.
+  TProfileUpdateDone = reference to procedure(const AFilePath: string; ASuccess: boolean; const AError: string);
+
+  // One HTTP request, one file.
+  //
+  // This must be *fully* declared in the interface: TDrover holds a list of these
+  // and TProfileUpdateDone is used as a TDrover method parameter. A bare forward
+  // declaration ("TProfileUpdateThread = class;") is not enough - the compiler
+  // then reports "not yet completely defined" and every use of Finished,
+  // FilePath or Terminate on it degrades into an undeclared identifier.
+  //
+  // FreeOnTerminate is True so the worker owns its own lifetime and nothing can
+  // free it while its queued completion callback is still pending. TDrover keeps a
+  // non-owning list purely so shutdown can terminate and join workers that are
+  // still running.
+  TProfileUpdateThread = class(TThread)
+  private
+    FUpdater: TConfigUpdater;
+    FFilePath: string;
+    FOnDone: TProfileUpdateDone;
+    FSuccess: boolean;
+    FError: string;
+    FTraffic: TSubscriptionUserInfo;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const AFilePath, ARemotePath: string; AIntervalMinutes: int32;
+      ALastUpdated: int64; ASingBoxCli: TSingBoxCli; ALogger: TLogger; const AWorkDir: string;
+      AOnDone: TProfileUpdateDone);
+    destructor Destroy; override;
+    // Dropping the callback prevents the worker from queueing work that would
+    // touch a GUI that is being torn down.
+    procedure DetachCallback;
+    property Success: boolean read FSuccess;
+    property ErrorMessage: string read FError;
+    property Traffic: TSubscriptionUserInfo read FTraffic;
+    property FilePath: string read FFilePath;
+  end;
+
 
   TDrover = class
   private
@@ -87,7 +123,12 @@ type
     FProfilesDir: string;
     FActiveProfilePath: string;
     FUpdaterResults: TThreadedQueue<TUpdaterEvent>;
-    FUpdateWorkers: TObjectList<TProfileUpdateThread>;
+    FUpdateWorkers: TList<TProfileUpdateThread>;
+    // Backing state for the published NeedsElevation / CoreState properties. These
+    // were previously referenced as if they were fields while being declared as a
+    // method (or not at all), which is a compile error.
+    FNeedsElevation: boolean;
+    FSupervisorState: TCoreState;
 
     procedure HandleCoreEvent(event: TCoreEvent);
     procedure HandleUpdaterNotify(const AFilePath: string; ASuccess: boolean; const AError: string;
@@ -97,6 +138,9 @@ type
     function TakeUpdateResult(out AResult: TUpdateAttemptResult; out AFilePath: string): boolean;
     function IsWorkerFinished(AWorker: TThread; ATerminateSeen: boolean): boolean;
     function BackgroundWorkersFinished: boolean;
+    // Refreshes FSupervisorState from the supervisor so the CoreState property
+    // always reflects the core that is actually running.
+    procedure SyncSupervisorState;
     procedure RequestShutdownWorkers;
     procedure TryCompleteShutdown;
     // Terminates and joins every one-shot profile worker. Called while shutting
@@ -190,7 +234,7 @@ type
     //
     // Returns True when a result was consumed; AFilePath then names the profile
     // that was updated. The caller refreshes the tray menu on every event.
-    function TryApplyUpdate(const AFilePath: string; out AResult: TUpdateAttemptResult): boolean;
+    function TryApplyUpdate(out AFilePath: string; out AResult: TUpdateAttemptResult): boolean;
     // Applies a profile whose file changed while it was the active one.
     function ApplyPendingReload: boolean;
 
@@ -212,7 +256,7 @@ var
 begin
   FPendingEvents := TList<TDroverEvent>.Create;
   FUpdaterResults := TThreadedQueue<TUpdaterEvent>.Create(64, 1000, 1000);
-  FUpdateWorkers := TObjectList<TProfileUpdateThread>.Create(false);
+  FUpdateWorkers := TList<TProfileUpdateThread>.Create;
   FConfigUpdater := nil;
   FActiveProfilePath := '';
   FPendingConfigText := '';
@@ -269,6 +313,7 @@ begin
   FSupervisor.OnTerminate := HandleWorkerTerminated;
 
   FNeedsElevation := sbConfig.hasTunInbound and (not FIsElevated);
+  SyncSupervisorState;
 end;
 
 procedure TDrover.Start;
@@ -296,12 +341,14 @@ begin
   inherited;
 end;
 
-function TDrover.FSupervisorState: TCoreState;
+// FSupervisorState is a plain field, published through the CoreState property and
+// refreshed by SyncSupervisorState whenever a core event arrives.
+procedure TDrover.SyncSupervisorState;
 begin
   if Assigned(FSupervisor) then
-    result := FSupervisor.state
+    FSupervisorState := FSupervisor.state
   else
-    result := csStopped;
+    FSupervisorState := csStopped;
 end;
 
 function TDrover.ResolveConfigPath: string;
@@ -312,7 +359,7 @@ begin
     if TFile.Exists(FActiveProfilePath) then
     begin
       try
-        SubscriptionManager.Load(FActiveProfilePath);
+        TSubscriptionManager.Load(FActiveProfilePath);
         exit(FActiveProfilePath);
       except
         Log('Active profile is unreadable, falling back to the config file: ' + FActiveProfilePath);
@@ -610,8 +657,12 @@ begin
   result := true;
 end;
 
-// The worker list only ever shrinks here, and only from the main thread: the
-// completion callback owns the worker until it returns.
+// The worker list only ever shrinks here, and it is a non-owning list: each worker
+// has FreeOnTerminate = True and frees itself. This only drops the list reference.
+//
+// When the thread finishes, the RTL defers the actual self-free until its queued
+// Execute method has run, so by the time a worker is observed as Finished here its
+// completion callback has already been dispatched and the object is gone.
 procedure TDrover.CleanupFinishedUpdateWorkers;
 var
   index: integer;
@@ -641,7 +692,7 @@ begin
     begin
       // Drop the callback first: after this point the worker must not queue work
       // that would touch the GUI while it is being torn down.
-      worker.OnDone := nil;
+      worker.DetachCallback;
       worker.Terminate;
     end;
   end;
@@ -707,19 +758,16 @@ begin
   result := true;
 end;
 
-function TDrover.TryApplyUpdate(const AFilePath: string; out AResult: TUpdateAttemptResult): boolean;
-var
-  storedPath: string;
+function TDrover.TryApplyUpdate(out AFilePath: string; out AResult: TUpdateAttemptResult): boolean;
 begin
   result := false;
+  AFilePath := '';
   AResult := Default (TUpdateAttemptResult);
 
-  if not TakeUpdateResult(AResult, storedPath) then
+  if not TakeUpdateResult(AResult, AFilePath) then
     exit;
 
-  AFilePath := storedPath;
   result := true;
-
   if not AResult.success then
   begin
     NotifyEvent(dekSubscriptionUpdated, '');
@@ -728,20 +776,20 @@ begin
 
   // Traffic metadata belongs to AppState, never to the BPF: the BPF format stays
   // untouched.
-  FAppState.SetSubscriptionInfo(TSubscriptionManager.ToStoredPath(storedPath, currentProcessDir),
+  FAppState.SetSubscriptionInfo(TSubscriptionManager.ToStoredPath(AFilePath, currentProcessDir),
     AResult.traffic);
 
-  if not IsActiveProfile(storedPath) then
+  if not IsActiveProfile(AFilePath) then
   begin
     // An inactive subscription updated: the file changed, the running core must
     // not. This is the guard against "A, B, C all update, core ends up on C".
-    Log('Inactive profile updated, runtime untouched: ' + storedPath);
+    Log('Inactive profile updated, runtime untouched: ' + AFilePath);
     NotifyEvent(dekSubscriptionUpdated, '');
     exit;
   end;
 
   configSource.bpfProfile.lastUpdated := AResult.profile.lastUpdated;
-  FPendingProfilePath := storedPath;
+  FPendingProfilePath := AFilePath;
   FPendingConfigText := AResult.profile.configJson;
 
   if not ApplyPendingReload then
@@ -931,6 +979,10 @@ procedure TDrover.HandleCoreEvent(event: TCoreEvent);
 begin
   if FDestroying or FShutdownRequested then
     exit;
+
+  // Keep the published CoreState in step with the core, including for event kinds
+  // that are not forwarded to the GUI.
+  SyncSupervisorState;
 
   case event.kind of
     cekState:
@@ -1164,29 +1216,15 @@ begin
 end;
 
 
-type
-  // One HTTP request, one file. The owner keeps the reference in a list and
-  // frees it only after the download finished and the queued callback has run.
-  TProfileUpdateThread = class(TThread)
-  private
-    FUpdater: TConfigUpdater;
-    FFilePath: string;
-    FOnDone: TProfileUpdateDone;
-    FSuccess: boolean;
-    FError: string;
-    FTraffic: TSubscriptionUserInfo;
-  protected
-    procedure Execute; override;
-  public
-    constructor Create(const AFilePath, ARemotePath: string; AIntervalMinutes: int32;
-      ALastUpdated: int64; ASingBoxCli: TSingBoxCli; ALogger: TLogger; const AWorkDir: string;
-      AOnDone: TProfileUpdateDone);
-    destructor Destroy; override;
-    property Success: boolean read FSuccess;
-    property ErrorMessage: string read FError;
-    property Traffic: TSubscriptionUserInfo read FTraffic;
-    property FilePath: string read FFilePath;
-  end;
+// TProfileUpdateThread is declared in the interface section: TDrover holds a list
+// of them and the completion callback is a TDrover method parameter.
+
+// Called while shutting down, before the worker is terminated: after this the
+// worker must not queue a callback that would touch a GUI being torn down.
+procedure TProfileUpdateThread.DetachCallback;
+begin
+  FOnDone := nil;
+end;
 
 constructor TProfileUpdateThread.Create(const AFilePath, ARemotePath: string;
   AIntervalMinutes: int32; ALastUpdated: int64; ASingBoxCli: TSingBoxCli;
@@ -1200,7 +1238,7 @@ begin
   FUpdater := TConfigUpdater.Create(AFilePath, ARemotePath, AIntervalMinutes,
     ALastUpdated, ASingBoxCli, ALogger, AWorkDir);
 
-  FreeOnTerminate := false;
+  FreeOnTerminate := true;
   inherited Create(false);
 end;
 
@@ -1214,6 +1252,8 @@ procedure TProfileUpdateThread.Execute;
 var
   handler: TProfileUpdateDone;
   path: string;
+  err: string;
+  ok: boolean;
 begin
   try
     FSuccess := FUpdater.DownloadProfile(FError, FTraffic);
@@ -1229,14 +1269,17 @@ begin
   if not Assigned(handler) then
     exit;
 
-  // Capture the path by value: the receiver must not need this instance, which is
-  // freed as soon as the queued callback below has run.
+  // Copy everything the queued callback needs into locals. Capturing the fields
+  // directly would make the closure capture Self, and this thread frees itself on
+  // termination, so the callback must not dereference the instance at all.
   path := FFilePath;
+  err := FError;
+  ok := FSuccess;
 
   TThread.Queue(nil,
     procedure
     begin
-      handler(path, FSuccess, FError);
+      handler(path, ok, err);
     end);
 end;
 
