@@ -9,8 +9,13 @@ uses
   IniFiles;
 
 const
-  OPTIONS_FILENAME = 'sing-box-drover.ini';
-  SECTION_MAIN = 'sing-box-drover';
+  OPTIONS_FILENAME = 'JieJieBox.ini';
+  // Pre-rename installs keep working: if the new file is absent the old one is
+  // used, and it is never rewritten by the app.
+  LEGACY_OPTIONS_FILENAME = 'sing-box-drover.ini';
+  SECTION_MAIN = 'JieJieBox';
+  // Older ini files used this section name.
+  LEGACY_SECTION_MAIN = 'sing-box-drover';
 
 type
   TTunStartMode = (tsmOn, tsmOff);
@@ -24,6 +29,7 @@ type
     selectorMenuLayout: TSelectorMenuLayout;
     selectorPersist: boolean;
     logFile: string;
+    iniPath: string;
 
     class function Load(filename: string): TDroverOptions; static;
   private
@@ -62,6 +68,14 @@ begin
 
   result := Default (TDroverOptions);
 
+  if not FileExists(filename) then
+  begin
+    path := currentDir + LEGACY_OPTIONS_FILENAME;
+    if FileExists(path) then
+      filename := path;
+  end;
+  result.iniPath := filename;
+
   try
     f := TIniFile.Create(filename);
     try
@@ -69,12 +83,16 @@ begin
       begin
         s := ReadString(SECTION_MAIN, 'sb-dir', '');
         if s = '' then
+          s := ReadString(LEGACY_SECTION_MAIN, 'sb-dir', '');
+        if s = '' then
           s := currentDir
         else
           s := IncludeTrailingPathDelimiter(s);
         result.sbDir := s;
 
-        s := ReadString(SECTION_MAIN, 'sb-config-file', 'config.json');
+        s := ReadString(SECTION_MAIN, 'sb-config-file', '');
+        if s = '' then
+          s := ReadString(LEGACY_SECTION_MAIN, 'sb-config-file', 'config.json');
         if not s.Contains(':') then
         begin
           for path in [currentDir + s, result.sbDir + s] do
@@ -88,8 +106,10 @@ begin
         end;
         result.sbConfigFile := s;
 
+        // tun-start-mode / system-proxy-auto are accepted but ignored: the
+        // config decides TUN and the system proxy now.
         result.tunStartMode := ParseTunStartMode(ReadString(SECTION_MAIN, 'tun-start-mode', ''));
-        result.systemProxyAuto := ReadBool(SECTION_MAIN, 'system-proxy-auto', false);
+        result.systemProxyAuto := true;
         result.selectorMenuLayout := ParseSelectorMenuLayout(ReadString(SECTION_MAIN, 'selector-menu-layout', ''));
         result.selectorPersist := ReadBool(SECTION_MAIN, 'selector-persist', true);
 

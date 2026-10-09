@@ -38,6 +38,7 @@ function LooksLikeBpfProfileData(const AData: TBytes): boolean;
 function DecodeBpfProfile(const AData: TBytes): TBpfProfile;
 function TryDecodeBpfProfile(const AData: TBytes; out AProfile: TBpfProfile): boolean;
 function EncodeBpfProfile(const AProfile: TBpfProfile): TBytes;
+procedure WriteBpfProfileFile(const AFileName: string; const AProfile: TBpfProfile);
 procedure WriteBpfProfileToFile(const AFileName: string; const AProfile: TBpfProfile);
 function ReadBpfProfileFromFile(const AFileName: string): TBpfProfile;
 function CreateLocalBpfProfile(const AConfigJson: string; const AName: string = ''): TBpfProfile;
@@ -48,7 +49,8 @@ implementation
 
 uses
   System.IOUtils,
-  System.ZLib;
+  System.ZLib,
+  Winapi.Windows;
 
 const
   ZLIB_MAX_WINDOW_BITS = 15;
@@ -385,13 +387,64 @@ begin
     Move(compressedPayload[0], result[2], Length(compressedPayload));
 end;
 
-procedure WriteBpfProfileToFile(const AFileName: string; const AProfile: TBpfProfile);
+// Writes a file through a temp file + atomic replace so that a crash or power
+// loss can never leave a half-written profile behind. Falls back to a direct
+// write only if the replace itself is refused by the filesystem.
+procedure AtomicWriteFile(const AFileName: string; const AData: TBytes);
+var
+  tempName: string;
+  tempWritten: boolean;
+begin
+  tempWritten := false;
+  tempName := AFileName + '.tmp-' + TGUID.NewGuid.ToString;
+
+  try
+    try
+      TFile.WriteAllBytes(tempName, AData);
+      tempWritten := true;
+    except
+      tempWritten := false;
+    end;
+
+    if tempWritten then
+    begin
+      try
+        if TFile.Exists(AFileName) then
+          TFile.Replace(tempName, AFileName, '')
+        else
+          TFile.Move(tempName, AFileName);
+        tempWritten := false;
+      except
+        // Keep the temp file: the direct write below is the emergency path and
+        // the temp file is removed in the finally block when that succeeds.
+      end;
+    end;
+
+    if tempWritten then
+      TFile.WriteAllBytes(AFileName, AData);
+  finally
+    if tempWritten then
+    begin
+      try
+        TFile.Delete(tempName);
+      except
+      end;
+    end;
+  end;
+end;
+
+procedure WriteBpfProfileFile(const AFileName: string; const AProfile: TBpfProfile);
 begin
   try
-    TFile.WriteAllBytes(AFileName, EncodeBpfProfile(AProfile));
+    AtomicWriteFile(AFileName, EncodeBpfProfile(AProfile));
   except
     raise EBpfProfileError.Create('Failed to write BPF profile file.');
   end;
+end;
+
+procedure WriteBpfProfileToFile(const AFileName: string; const AProfile: TBpfProfile);
+begin
+  WriteBpfProfileFile(AFileName, AProfile);
 end;
 
 function ReadBpfProfileFromFile(const AFileName: string): TBpfProfile;
