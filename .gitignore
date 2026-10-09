@@ -77,6 +77,14 @@ __recovery/
 # Castalia statistics file (since XE7 Castalia is distributed with Delphi)
 *.stat
 
+# Packaging output and downloaded build inputs: never committed.
+dist/
+sing-box.exe
+core.txt
+.build-stamp.txt
+build-Win64-Release.log
+build-Win32-Release.log
+
 # Boss dependency manager vendor folder https://github.com/HashLoad/boss
 modules/
 

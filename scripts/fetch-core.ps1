@@ -91,6 +91,91 @@ function Get-AssetSha256 {
     return ''
 }
 
+# Reads the COFF machine field straight out of the PE header. The SHA256 only
+# proves the bytes are the ones that were published; it says nothing about the
+# architecture, so a wrong-architecture core must be rejected separately.
+function Get-PeMachine {
+    param([string]$Path)
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x40) {
+        throw "File is too small to be a PE image: $Path"
+    }
+    if (($bytes[0] -ne 0x4D) -or ($bytes[1] -ne 0x5A)) {
+        throw "File does not start with an MZ header: $Path"
+    }
+
+    $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3C)
+    if (($peOffset -le 0) -or ($peOffset + 6 -gt $bytes.Length)) {
+        throw "File has an invalid PE header offset: $Path"
+    }
+    if (($bytes[$peOffset] -ne 0x50) -or ($bytes[$peOffset + 1] -ne 0x45)) {
+        throw "File does not carry a PE signature: $Path"
+    }
+
+    return [System.BitConverter]::ToUInt16($bytes, $peOffset + 4)
+}
+
+# 0x8664 is IMAGE_FILE_MACHINE_AMD64.
+function Assert-Amdfour {
+    param(
+        [string]$Path,
+        [string]$What
+    )
+
+    $machine = Get-PeMachine -Path $Path
+    if ($machine -ne 0x8664) {
+        throw ("$What is not a Windows x86-64 (AMD64) binary: {0} (machine 0x{1:X4})." -f $Path, $machine)
+    }
+    Write-Host ("    {0} PE machine: 0x{1:X4} (AMD64)" -f $What, $machine) -ForegroundColor Green
+}
+
+# Downloads a release asset to a file, with retries.
+#
+# The public API asset endpoint is used rather than browser_download_url. Both
+# resolve to the same bytes, but browser_download_url is served from
+# github.com/releases/download and then redirects to the objects host; on networks
+# where github.com is filtered that redirect fails part-way through the body
+# ("unexpected EOF"). The API endpoint streams the asset directly and only needs
+# api.github.com, which is the same host the release metadata already came from.
+function Save-AssetFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$OutFile,
+        [string]$Description = 'asset'
+    )
+
+    $headers = @{
+        'User-Agent' = $UserAgent
+        'Accept'     = 'application/octet-stream'
+    }
+    if ($env:GITHUB_TOKEN) {
+        $headers['Authorization'] = "Bearer $($env:GITHUB_TOKEN)"
+    }
+
+    $attempts = 3
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        if (Test-Path -LiteralPath $OutFile) {
+            Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+        }
+
+        try {
+            Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -Headers $headers -TimeoutSec 900
+            if ((Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 0)) {
+                return
+            }
+            throw 'The downloaded file is empty.'
+        }
+        catch {
+            if ($attempt -eq $attempts) {
+                throw ("Failed to download $Description after $attempts attempts: $($_.Exception.Message)")
+            }
+            Write-Warning ("Download of $Description failed (attempt $attempt/$attempts): $($_.Exception.Message)")
+            Start-Sleep -Seconds (2 * $attempt)
+        }
+    }
+}
+
 try {
     if ($OutputDir -eq '') {
         $OutputDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -122,7 +207,9 @@ try {
         $existing = (Get-Content -LiteralPath $stampPath -Raw)
         if ($existing -match [regex]::Escape("tag=$resolvedTag")) {
             Write-Host "    already up to date; pass -Force to re-download." -ForegroundColor Green
-            exit 0
+            # return, not exit: package-release.ps1 dot-invokes this script, and an
+            # exit here would tear down the whole packaging run.
+            return
         }
     }
 
@@ -134,7 +221,7 @@ try {
     }
     if ($candidates.Count -gt 1) {
         $names = ($candidates | ForEach-Object { $_.name }) -join ', '
-        throw "Ambiguous Windows amd64 asset in $resolvedTag: $names"
+        throw "Ambiguous Windows amd64 asset in ${resolvedTag}: $names"
     }
 
     $asset = $candidates[0]
@@ -153,9 +240,11 @@ try {
         $sumsPath = Join-Path $script:workDir $SumsAssetName
 
         # --- 3. download zip + SHA256SUMS from the same tag -----------------
+        # Both assets come from the frozen tag resolved in step 1, never from a
+        # second `latest` lookup, so one build can never mix two core versions.
         Write-Step "Downloading core archive"
-        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing -Headers @{ 'User-Agent' = $UserAgent }
-        Invoke-WebRequest -Uri $sumsAsset[0].browser_download_url -OutFile $sumsPath -UseBasicParsing -Headers @{ 'User-Agent' = $UserAgent }
+        Save-AssetFile -Uri $asset.url -OutFile $zipPath -Description $asset.name
+        Save-AssetFile -Uri $sumsAsset[0].url -OutFile $sumsPath -Description $SumsAssetName
 
         # --- 4. verify -----------------------------------------------------
         Write-Step "Verifying SHA256"
@@ -186,17 +275,28 @@ try {
 
         Copy-Item -LiteralPath $exe.FullName -Destination $corePath -Force
 
+        # The archive hash is verified, but the architecture still has to be
+        # checked explicitly - a hash match cannot detect a wrong-arch build.
+        Assert-Amdfour -Path $corePath -What 'sing-box.exe'
+
         # --- 6. report the real version ------------------------------------
+        # A core that cannot report its version is not usable, so this is a hard
+        # failure rather than a warning: a "successful" fetch that produced an
+        # unrunnable core would be worse than no core at all.
+        Write-Step "Checking the core actually runs"
         $reportedVersion = ''
-        try {
-            $firstLine = (& $corePath version 2>&1 | Select-Object -First 1)
-            if ($firstLine) {
-                $reportedVersion = $firstLine.ToString().Trim()
-            }
+        $versionOutput = & $corePath version 2>&1
+        $versionExit = $LASTEXITCODE
+        if ($versionExit -ne 0) {
+            throw "'sing-box.exe version' failed with exit code $versionExit. Output: $versionOutput"
         }
-        catch {
-            Write-Warning "Could not run '$corePath version': $($_.Exception.Message)"
+        if ($versionOutput) {
+            $reportedVersion = ($versionOutput | Select-Object -First 1).ToString().Trim()
         }
+        if ($reportedVersion -eq '') {
+            throw "'sing-box.exe version' produced no output."
+        }
+        Write-Host "    version: $reportedVersion" -ForegroundColor Green
 
         $coreHash = (Get-FileHash -LiteralPath $corePath -Algorithm SHA256).Hash.ToLowerInvariant()
 
@@ -206,6 +306,7 @@ try {
             "asset=$($asset.name)",
             "asset_sha256=$expected",
             "sing-box.exe_sha256=$coreHash",
+            "pe_machine=0x8664",
             "version=$reportedVersion"
         ) -join [Environment]::NewLine
 
@@ -223,11 +324,13 @@ try {
             Remove-Item -LiteralPath $script:workDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-
-    exit 0
 }
 catch {
+    # Rethrow instead of exit: this script must be safe to run as part of a larger
+    # PowerShell session (package-release.ps1 does exactly that). The caller decides
+    # how to report the failure, and a standalone caller still sees a terminating
+    # error and a non-zero exit code.
     Write-Host ''
     Write-Host "fetch-core failed: $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
+    throw
 }
