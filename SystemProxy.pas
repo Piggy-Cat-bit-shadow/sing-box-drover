@@ -207,14 +207,19 @@ begin
   opts[count].Value.dwValue := flags;
   inc(count);
 
-  // Only pass a proxy server string when the snapshot actually had one; an empty
-  // string would be written verbatim instead of clearing the option.
+  // The PROXY_SERVER option must always be supplied.
+  //
+  // When the snapshot had a proxy we write it back verbatim. When the snapshot was
+  // direct we must write an explicit empty string: merely clearing the PROXY_TYPE_PROXY
+  // flag turns the proxy off but WinINet keeps the old ProxyServer string in the
+  // registry, so a user who later re-enables the Windows proxy would be pointed at
+  // this application's dead port. Passing '' is how the option is cleared.
+  opts[count].dwOption := INTERNET_PER_CONN_PROXY_SERVER;
   if (flags and PROXY_TYPE_PROXY) <> 0 then
-  begin
-    opts[count].dwOption := INTERNET_PER_CONN_PROXY_SERVER;
-    opts[count].Value.pszValue := PChar(server);
-    inc(count);
-  end;
+    opts[count].Value.pszValue := PChar(server)
+  else
+    opts[count].Value.pszValue := PChar('');
+  inc(count);
 
   if bypass <> '' then
   begin

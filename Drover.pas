@@ -129,11 +129,15 @@ type
     // method (or not at all), which is a compile error.
     FNeedsElevation: boolean;
     FSupervisorState: TCoreState;
+    // Set once WM_DROVER_CAN_CLOSE has been posted, so the worker Terminate
+    // callback and the GUI fallback poll cannot both queue a WM_CLOSE.
+    FCanClosePosted: boolean;
 
     procedure HandleCoreEvent(event: TCoreEvent);
     procedure HandleUpdaterNotify(const AFilePath: string; ASuccess: boolean; const AError: string;
       const AProfile: TBpfProfile; const ATraffic: TSubscriptionUserInfo);
     procedure HandleWorkerTerminated(sender: TObject);
+    // Posted at most once per process.
     procedure PostCanClose;
     function TakeUpdateResult(out AResult: TUpdateAttemptResult; out AFilePath: string): boolean;
     function IsWorkerFinished(AWorker: TThread; ATerminateSeen: boolean): boolean;
@@ -180,7 +184,17 @@ type
     // of the current Windows proxy setting.
     function AppliedSystemProxyServer: string;
 
+    // Idempotent. True only once every background worker is gone and the logger is
+    // closed; the GUI waits for PollShutdown or WM_DROVER_CAN_CLOSE rather than
+    // closing on the first call.
     function Shutdown: boolean;
+
+    // Re-evaluates shutdown progress, posts WM_DROVER_CAN_CLOSE exactly once on the
+    // transition to complete, and returns whether shutdown has finished. Safe to
+    // call repeatedly; the GUI uses it as a bounded fallback poll so a lost
+    // OnTerminate notification can never leave the process resident.
+    function PollShutdown: boolean;
+    function ShutdownComplete: boolean;
 
     // Starts (or restarts) the core with the raw config of the active profile.
     // CoreSupervisor.DoStart already stops the old core first, so this doubles
@@ -261,6 +275,12 @@ begin
   FActiveProfilePath := '';
   FPendingConfigText := '';
   FPendingProfilePath := '';
+  FShutdownRequested := false;
+  FShutdownCompleted := false;
+  FSupervisorTerminateSeen := false;
+  FConfigUpdaterTerminateSeen := false;
+  FCanClosePosted := false;
+  FDestroying := false;
 
   currentProcessDir := IncludeTrailingPathDelimiter(ExtractFilePath(ParamStr(0)));
 
@@ -1006,6 +1026,9 @@ begin
   end;
 end;
 
+// Reached through TThread.OnTerminate, which the RTL delivers by queueing a method
+// call to the main thread. This is therefore *one* signal among several and must
+// never be the only way shutdown can finish - see TDrover.PollShutdown.
 procedure TDrover.HandleWorkerTerminated(sender: TObject);
 begin
   if sender = FSupervisor then
@@ -1016,9 +1039,7 @@ begin
   if FDestroying or (not FShutdownRequested) or FShutdownCompleted then
     exit;
 
-  TryCompleteShutdown;
-  if FShutdownCompleted then
-    PostCanClose;
+  PollShutdown;
 end;
 
 procedure TDrover.ApplyPersistedSelectors;
@@ -1147,6 +1168,10 @@ begin
   result := SystemProxy.AppliedProxyServer;
 end;
 
+// Idempotent: the first call owns the shutdown decision, later calls only report
+// progress. Returns True once everything has been torn down, which is normally
+// False on the first call because the workers need a moment to stop - the GUI then
+// waits for PollShutdown/WM_DROVER_CAN_CLOSE instead of closing immediately.
 function TDrover.Shutdown: boolean;
 begin
   if FShutdownCompleted then
@@ -1162,18 +1187,33 @@ begin
   result := FShutdownCompleted;
 end;
 
+// Advances the shutdown state machine and reports whether everything is torn down.
+//
+// This is deliberately callable from any of three places - the initial close
+// request, the worker Terminate callback, and the GUI's fallback poll - because
+// completion must never depend on a single notification arriving. TThread.OnTerminate
+// is delivered by queueing a method call to the main thread, so it is only *one*
+// possible signal and can legitimately be missed.
 procedure TDrover.TryCompleteShutdown;
 begin
-  if FShutdownCompleted or (not BackgroundWorkersFinished) then
+  if FShutdownCompleted then
+    exit;
+
+  if not BackgroundWorkersFinished then
     exit;
 
   FShutdownCompleted := true;
+  Log('Shutdown complete: all background workers finished.');
+
   if Assigned(FLogger) then
     FLogger.Close;
 end;
 
 function TDrover.IsWorkerFinished(AWorker: TThread; ATerminateSeen: boolean): boolean;
 begin
+  // AWorker.Finished is the authoritative signal. OnTerminate is only a hint used
+  // to satisfy the unit's existing bookkeeping; the state machine must not require
+  // it, because the corresponding queued call can be removed or never delivered.
   result := (not Assigned(AWorker)) or ATerminateSeen or AWorker.Finished;
 end;
 
@@ -1185,17 +1225,25 @@ end;
 
 procedure TDrover.RequestShutdownWorkers;
 begin
+  Log('Shutdown requested: terminating background workers.');
+
   if Assigned(FConfigUpdater) and not FConfigUpdater.Finished then
   begin
     FConfigUpdater.OnNotify := nil;
+    FConfigUpdater.OnTerminate := nil;
     FConfigUpdater.Terminate;
   end;
 
   if Assigned(FSupervisor) and not FSupervisor.Finished then
   begin
     FSupervisor.OnEvent := nil;
+    FSupervisor.OnTerminate := nil;
     FSupervisor.Terminate;
-    TThread.RemoveQueuedEvents(FSupervisor);
+    // NOTE: TThread.RemoveQueuedEvents(FSupervisor) used to be called here. That
+    // was the P0 defect: it discarded the queued OnTerminate method call, which was
+    // the only route to PostCanClose, so the window was never told it could close
+    // and the process stayed resident forever with every thread idle. Completion is
+    // now signal-independent, so there is nothing to force-remove.
   end;
 
   // The one-shot profile workers are owned here too: any of them still running
@@ -1204,10 +1252,41 @@ begin
   StopUpdateWorkers;
 end;
 
+// True once every worker is gone and the logger has been closed.
+function TDrover.ShutdownComplete: boolean;
+begin
+  result := FShutdownCompleted;
+end;
+
+// Re-evaluates shutdown progress and, on the transition to complete, tells the GUI
+// exactly once that the window may close. Safe to call repeatedly.
+function TDrover.PollShutdown: boolean;
+begin
+  if FShutdownRequested then
+  begin
+    TryCompleteShutdown;
+    if FShutdownCompleted then
+      PostCanClose;
+  end;
+
+  result := FShutdownCompleted;
+end;
+
+// Posted at most once. Without the guard, the worker Terminate callback and the
+// GUI's fallback poll could both fire and queue two WM_CLOSE messages.
 procedure TDrover.PostCanClose;
 begin
-  if (FNotifyHandle <> 0) and IsWindow(FNotifyHandle) then
-    PostMessage(FNotifyHandle, WM_DROVER_CAN_CLOSE, 0, 0);
+  if FCanClosePosted then
+    exit;
+
+  if (FNotifyHandle = 0) or (not IsWindow(FNotifyHandle)) then
+    exit;
+
+  FCanClosePosted := true;
+  Log('Posting WM_DROVER_CAN_CLOSE.');
+
+  if not PostMessage(FNotifyHandle, WM_DROVER_CAN_CLOSE, 0, 0) then
+    Log('PostMessage(WM_DROVER_CAN_CLOSE) failed; the GUI fallback poll will recover.');
 end;
 
 procedure TDrover.Log(const AMessage: string);

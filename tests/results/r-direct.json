@@ -1,0 +1,92 @@
+﻿[
+    {
+        "scenario":  "wmclose",
+        "index":  1,
+        "guiPid":  18008,
+        "corePids":  [
+                         11916
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "0|",
+        "proxyAfter":  "0|",
+        "elapsedMs":  286,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  2,
+        "guiPid":  10744,
+        "corePids":  [
+                         14160
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "0|",
+        "proxyAfter":  "0|",
+        "elapsedMs":  145,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  3,
+        "guiPid":  22660,
+        "corePids":  [
+                         23096
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "0|",
+        "proxyAfter":  "0|",
+        "elapsedMs":  149,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  4,
+        "guiPid":  3492,
+        "corePids":  [
+                         23240
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "0|",
+        "proxyAfter":  "0|",
+        "elapsedMs":  287,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  5,
+        "guiPid":  22720,
+        "corePids":  [
+                         18116
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "0|",
+        "proxyAfter":  "0|",
+        "elapsedMs":  154,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    }
+]

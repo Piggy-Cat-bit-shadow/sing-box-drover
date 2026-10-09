@@ -62,6 +62,8 @@ type
     procedure miDeleteProfileClick(Sender: TObject);
     procedure PopupMenuPopup(Sender: TObject);
     procedure TimerTimer(Sender: TObject);
+    // Bounded fallback for the close path; see SHUTDOWN_POLL_INTERVAL_MS.
+    procedure PollShutdownProgress;
     procedure TrayIconMouseUp(Sender: TObject; Button: TMouseButton; Shift: TShiftState;
       X, Y: Integer);
   private
@@ -120,6 +122,11 @@ const
   POPUP_DEBOUNCE_MS = 400;
   // A timer tick used to drive both the update and the scheduled refresh check.
   TIMER_ID = 1;
+  // Bounded fallback while closing: how often the GUI re-checks whether every
+  // background worker has stopped. TThread.OnTerminate is delivered by queueing a
+  // method call, so it is not a guaranteed signal and must not be the only route
+  // to a completed close.
+  SHUTDOWN_POLL_INTERVAL_MS = 100;
 
 procedure TfrmMain.FormCreate(Sender: TObject);
 begin
@@ -597,7 +604,15 @@ end;
 
 procedure TfrmMain.TimerTimer(Sender: TObject);
 begin
-  if FClosePending or (not Assigned(FDrover)) then
+  if FClosePending then
+  begin
+    // The same timer is reused for the bounded shutdown fallback; the scheduled
+    // update check must not run while the GUI is closing.
+    PollShutdownProgress;
+    exit;
+  end;
+
+  if not Assigned(FDrover) then
     exit;
 
   if int64(GetTickCount64 - FScheduledUpdateTick) < 0 then
@@ -1015,7 +1030,6 @@ begin
 
   FClosePending := true;
   PopupMenu.OnPopup := nil;
-  Timer.Enabled := false;
 
   if (FDrover.AppliedSystemProxyServer <> '') then
   begin
@@ -1027,7 +1041,19 @@ begin
 
   ShowOnlyExitInTray;
 
-  CanClose := FDrover.Shutdown;
+  // The drover needs a moment to stop the core, so the first call normally returns
+  // False. Close is then completed by WM_DROVER_CAN_CLOSE, with the timer below as
+  // an independent fallback: TThread.OnTerminate is delivered by queueing a method
+  // call, so relying on it alone once left the process resident forever.
+  if FDrover.Shutdown then
+  begin
+    CanClose := true;
+    exit;
+  end;
+
+  Timer.Interval := SHUTDOWN_POLL_INTERVAL_MS;
+  Timer.Enabled := true;
+  CanClose := false;
 end;
 
 procedure TfrmMain.WMDroverCanClose(var msg: TMessage);
@@ -1037,6 +1063,17 @@ begin
 
   EndMenu;
   PostMessage(Handle, WM_CLOSE, 0, 0);
+end;
+
+// Bounded fallback for the close path. If WM_DROVER_CAN_CLOSE is ever lost, this
+// still finishes the shutdown instead of leaving a headless process behind.
+procedure TfrmMain.PollShutdownProgress;
+begin
+  if (not FClosePending) or (not Assigned(FDrover)) then
+    exit;
+
+  if FDrover.PollShutdown then
+    PostMessage(Handle, WM_DROVER_CAN_CLOSE, 0, 0);
 end;
 
 procedure TfrmMain.ShowOnlyExitInTray;
