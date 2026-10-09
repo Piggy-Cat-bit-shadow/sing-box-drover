@@ -1,7 +1,7 @@
 object frmMain: TfrmMain
   Left = 0
   Top = 0
-  Caption = 'sing-box-drover'
+  Caption = 'JieJieBox'
   ClientHeight = 278
   ClientWidth = 412
   Color = clBtnFace
@@ -14,16 +14,70 @@ object frmMain: TfrmMain
   OnCreate = FormCreate
   TextHeight = 15
   object PopupMenu: TPopupMenu
+    AutoHotkeys = maManual
     Left = 248
     Top = 40
-    object miExtras: TMenuItem
-      Caption = 'Extras'
-      object miRestart: TMenuItem
-        Caption = 'Restart'
-        OnClick = miRestartClick
+    object miStatus: TMenuItem
+      Caption = '...'
+      Enabled = False
+    end
+    object miSubscriptions: TMenuItem
+      Caption = '...'
+      object miSubProfilesEnd: TMenuItem
+        Caption = '-'
+      end
+      object miUpdateNow: TMenuItem
+        Caption = '...'
+        OnClick = miUpdateNowClick
+      end
+      object miAutoUpdate: TMenuItem
+        Caption = '...'
+        OnClick = miAutoUpdateClick
+      end
+      object miLastUpdated: TMenuItem
+        Caption = '...'
+        Enabled = False
+      end
+      object miTraffic: TMenuItem
+        Caption = '...'
+        Enabled = False
+        Visible = False
+      end
+      object miExpire: TMenuItem
+        Caption = '...'
+        Enabled = False
+        Visible = False
+      end
+      object miSubSeparator: TMenuItem
+        Caption = '-'
+      end
+      object miAddSubscription: TMenuItem
+        Caption = '...'
+        OnClick = miAddSubscriptionClick
+      end
+      object miOpenProfilesDir: TMenuItem
+        Caption = '...'
+        OnClick = miOpenProfilesDirClick
+      end
+    end
+    object miSelectors: TMenuItem
+      Caption = '...'
+    end
+    object miBeforeMore: TMenuItem
+      Caption = '-'
+    end
+    object miMore: TMenuItem
+      Caption = '...'
+      object miCoreVersion: TMenuItem
+        Caption = '...'
+        Enabled = False
+      end
+      object miRestartCore: TMenuItem
+        Caption = '...'
+        OnClick = miRestartCoreClick
       end
       object miAutostart: TMenuItem
-        Caption = 'Autostart'
+        Caption = '...'
         Enabled = False
         OnClick = miAutostartClick
       end
@@ -32,21 +86,15 @@ object frmMain: TfrmMain
         OnClick = miHomepageClick
       end
     end
-    object miTun: TMenuItem
-      Caption = 'TUN mode'
-      Visible = False
-      OnClick = miTunClick
-    end
-    object miSystemProxy: TMenuItem
-      Caption = 'System proxy'
-      OnClick = miSystemProxyClick
-    end
-    object miBeforeSelectors: TMenuItem
-      Caption = '-'
-    end
     object miQuit: TMenuItem
-      Caption = 'Quit'
+      Caption = '...'
       OnClick = miQuitClick
     end
+  end
+  object Timer: TTimer
+    Enabled = False
+    OnTimer = TimerTimer
+    Left = 320
+    Top = 40
   end
 end
