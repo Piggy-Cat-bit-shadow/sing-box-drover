@@ -1,0 +1,97 @@
+﻿[
+    {
+        "scenario":  "wmclose",
+        "index":  1,
+        "guiPid":  5948,
+        "corePids":  [
+                         21268
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "0|",
+        "proxyAfter":  "0|",
+        "elapsedMs":  298,
+        "appShutdownMs":  110,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  2,
+        "guiPid":  17172,
+        "corePids":  [
+                         20920
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "0|",
+        "proxyAfter":  "0|",
+        "elapsedMs":  154,
+        "appShutdownMs":  117,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  3,
+        "guiPid":  16100,
+        "corePids":  [
+                         21900
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "0|",
+        "proxyAfter":  "0|",
+        "elapsedMs":  276,
+        "appShutdownMs":  125,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  4,
+        "guiPid":  22736,
+        "corePids":  [
+                         5072
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "0|",
+        "proxyAfter":  "0|",
+        "elapsedMs":  152,
+        "appShutdownMs":  115,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "wmclose",
+        "index":  5,
+        "guiPid":  19932,
+        "corePids":  [
+                         21292
+                     ],
+        "portBefore":  false,
+        "portAfter":  true,
+        "proxyBefore":  "0|",
+        "proxyAfter":  "0|",
+        "elapsedMs":  167,
+        "appShutdownMs":  100,
+        "guiExited":  true,
+        "coreExited":  true,
+        "closePath":  "wmclose",
+        "pass":  true,
+        "note":  ""
+    }
+]

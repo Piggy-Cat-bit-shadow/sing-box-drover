@@ -1,0 +1,53 @@
+﻿[
+    {
+        "scenario":  "thirdparty",
+        "index":  1,
+        "guiPid":  2960,
+        "guiExited":  true,
+        "elapsedMs":  236,
+        "appShutdownMs":  110,
+        "coreChildren":  1,
+        "lateCores":  0,
+        "portFree":  true,
+        "proxyBefore":  "1|http://127.0.0.1:7890",
+        "proxyAfter":  "1|http://127.0.0.1:9999",
+        "proxyExpected":  "1|http://127.0.0.1:9999",
+        "dialogSeen":  false,
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "thirdparty",
+        "index":  2,
+        "guiPid":  20456,
+        "guiExited":  true,
+        "elapsedMs":  231,
+        "appShutdownMs":  108,
+        "coreChildren":  1,
+        "lateCores":  0,
+        "portFree":  true,
+        "proxyBefore":  "1|http://127.0.0.1:7890",
+        "proxyAfter":  "1|http://127.0.0.1:9999",
+        "proxyExpected":  "1|http://127.0.0.1:9999",
+        "dialogSeen":  false,
+        "pass":  true,
+        "note":  ""
+    },
+    {
+        "scenario":  "thirdparty",
+        "index":  3,
+        "guiPid":  12464,
+        "guiExited":  true,
+        "elapsedMs":  227,
+        "appShutdownMs":  114,
+        "coreChildren":  1,
+        "lateCores":  0,
+        "portFree":  true,
+        "proxyBefore":  "1|http://127.0.0.1:7890",
+        "proxyAfter":  "1|http://127.0.0.1:9999",
+        "proxyExpected":  "1|http://127.0.0.1:9999",
+        "dialogSeen":  false,
+        "pass":  true,
+        "note":  ""
+    }
+]
